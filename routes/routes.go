@@ -28,6 +28,8 @@ func Setup(router *gin.Engine, db *mongo.Database, logger *zap.Logger, corsOrigi
 	seoH := handlers.NewSEOHandler(db)
 	prerenderH := handlers.NewPrerenderHandler(db)
 	settingsH := handlers.NewSettingsHandler(db)
+	cacheH := handlers.NewCacheHandler(db)
+	queueH := handlers.NewQueueHandler(db)
 
 	api := router.Group("/api/v1")
 	{
@@ -68,6 +70,26 @@ func Setup(router *gin.Engine, db *mongo.Database, logger *zap.Logger, corsOrigi
 			settings.GET("", settingsH.List)
 			settings.PUT("", settingsH.Upsert)
 			settings.DELETE("/:key", settingsH.Delete)
+		}
+
+		// Cache Manager
+		cache := api.Group("/cache")
+		{
+			cache.GET("", cacheH.List)
+			cache.POST("", cacheH.Create)
+			cache.GET("/:id", cacheH.Get)
+			cache.PUT("/:id", cacheH.Update)
+			cache.DELETE("/:id", cacheH.Delete)
+		}
+
+		// Crawl Queue
+		queue := api.Group("/queue")
+		{
+			queue.GET("", queueH.List)
+			queue.POST("", queueH.Enqueue)
+			queue.GET("/:id", queueH.Get)
+			queue.PATCH("/:id", queueH.UpdateStatus)
+			queue.DELETE("/:id", queueH.Delete)
 		}
 	}
 }
