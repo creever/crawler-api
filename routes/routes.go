@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/hibiken/asynq"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.uber.org/zap"
 
@@ -12,7 +13,7 @@ import (
 )
 
 // Setup registers all routes on the given router
-func Setup(router *gin.Engine, db *mongo.Database, logger *zap.Logger, corsOrigins string) {
+func Setup(router *gin.Engine, db *mongo.Database, logger *zap.Logger, corsOrigins string, asynqClient *asynq.Client) {
 	// Global middleware
 	router.Use(middleware.CORS(corsOrigins))
 	router.Use(middleware.Logger(logger))
@@ -29,7 +30,7 @@ func Setup(router *gin.Engine, db *mongo.Database, logger *zap.Logger, corsOrigi
 	prerenderH := handlers.NewPrerenderHandler(db)
 	settingsH := handlers.NewSettingsHandler(db)
 	cacheH := handlers.NewCacheHandler(db)
-	queueH := handlers.NewQueueHandler(db)
+	queueH := handlers.NewQueueHandler(db, asynqClient)
 
 	api := router.Group("/api/v1")
 	{
@@ -44,6 +45,7 @@ func Setup(router *gin.Engine, db *mongo.Database, logger *zap.Logger, corsOrigi
 			projects.GET("/:id", projectH.Get)
 			projects.PUT("/:id", projectH.Update)
 			projects.DELETE("/:id", projectH.Delete)
+			projects.GET("/:id/config", projectH.GetConfig)
 		}
 
 		// SEO Analytics

@@ -194,3 +194,41 @@ func (h *ProjectHandler) Delete(c *gin.Context) {
 	}
 	c.Status(http.StatusNoContent)
 }
+
+// GetConfig godoc
+// @Summary      Get the crawler configuration for a project
+// @Description  Returns the ProjectConfig used when enqueuing crawl tasks for this project
+// @Tags         projects
+// @Produce      json
+// @Param        id  path  string  true  "Project ID"
+// @Success      200  {object}  models.ProjectConfig
+// @Failure      404  {object}  map[string]string
+// @Router       /api/v1/projects/{id}/config [get]
+func (h *ProjectHandler) GetConfig(c *gin.Context) {
+	id, err := bson.ObjectIDFromHex(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid project id"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var project models.Project
+	if err = h.col().FindOne(ctx, bson.M{"_id": id}).Decode(&project); err != nil {
+		if err == mongo.ErrNoDocuments {
+			c.JSON(http.StatusNotFound, gin.H{"error": "project not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch project"})
+		return
+	}
+
+	cfg := models.ProjectConfig{
+		ProjectID: project.ID.Hex(),
+		SeedURLs:  []string{project.URL},
+		UseJS:     project.UseJS,
+		MaxPages:  project.MaxPages,
+	}
+	c.JSON(http.StatusOK, cfg)
+}

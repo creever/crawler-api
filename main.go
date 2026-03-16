@@ -10,11 +10,13 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/hibiken/asynq"
 	"go.uber.org/zap"
 
 	"github.com/creever/crawler-api/config"
 	"github.com/creever/crawler-api/db"
 	"github.com/creever/crawler-api/routes"
+	"github.com/creever/crawler-api/worker"
 )
 
 func main() {
@@ -38,12 +40,29 @@ func main() {
 	defer db.Disconnect(mongoClient)
 	database := mongoClient.Database(cfg.MongoDB)
 
+	// Asynq client (used by the HTTP handler to enqueue tasks)
+	redisOpt := asynq.RedisClientOpt{Addr: cfg.RedisAddr}
+	asynqClient := asynq.NewClient(redisOpt)
+	defer asynqClient.Close()
+
+	// Asynq worker server
+	asynqSrv := worker.NewServer(cfg.RedisAddr, logger)
+	mux := asynq.NewServeMux()
+	worker.NewProcessor(database, logger).Register(mux)
+
+	go func() {
+		logger.Info("Starting asynq worker", zap.String("redis", cfg.RedisAddr))
+		if err := asynqSrv.Run(mux); err != nil {
+			logger.Fatal("Asynq worker error", zap.Error(err))
+		}
+	}()
+
 	// GIN
 	gin.SetMode(cfg.GinMode)
 	router := gin.New()
 	router.Use(gin.Recovery())
 
-	routes.Setup(router, database, logger, cfg.CORSOrigins)
+	routes.Setup(router, database, logger, cfg.CORSOrigins, asynqClient)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.ServerPort,
@@ -73,5 +92,7 @@ func main() {
 	if err := srv.Shutdown(ctx); err != nil {
 		logger.Fatal("Server forced to shutdown", zap.Error(err))
 	}
+
+	asynqSrv.Shutdown()
 	logger.Info("Server exited")
 }

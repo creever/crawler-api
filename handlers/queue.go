@@ -6,21 +6,24 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/hibiken/asynq"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/creever/crawler-api/models"
+	"github.com/creever/crawler-api/worker"
 )
 
 // QueueHandler holds dependencies for crawl queue endpoints.
 type QueueHandler struct {
-	db *mongo.Database
+	db          *mongo.Database
+	asynqClient *asynq.Client
 }
 
 // NewQueueHandler creates a new QueueHandler.
-func NewQueueHandler(db *mongo.Database) *QueueHandler {
-	return &QueueHandler{db: db}
+func NewQueueHandler(db *mongo.Database, asynqClient *asynq.Client) *QueueHandler {
+	return &QueueHandler{db: db, asynqClient: asynqClient}
 }
 
 func (h *QueueHandler) col() *mongo.Collection {
@@ -106,11 +109,11 @@ func (h *QueueHandler) Get(c *gin.Context) {
 }
 
 // Enqueue godoc
-// @Summary      Add a URL to the crawl queue for parsing and caching
+// @Summary      Add a URL to the crawl queue — creates an asynq background job
 // @Tags         queue
 // @Accept       json
 // @Produce      json
-// @Param        data  body      models.QueueEntry  true  "Queue entry"
+// @Param        data  body      models.QueueEntry  true  "Queue entry (task_type: seo|render)"
 // @Success      201   {object}  models.QueueEntry
 // @Router       /api/v1/queue [post]
 func (h *QueueHandler) Enqueue(c *gin.Context) {
@@ -120,15 +123,63 @@ func (h *QueueHandler) Enqueue(c *gin.Context) {
 		return
 	}
 
+	// Default task type to SEO when not specified.
+	if entry.TaskType == "" {
+		entry.TaskType = models.QueueTaskTypeSEO
+	}
+
+	// Look up the project to build the crawler config.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var project models.Project
+	if err := h.db.Collection("projects").FindOne(ctx, bson.M{"_id": entry.ProjectID}).Decode(&project); err != nil {
+		if err == mongo.ErrNoDocuments {
+			c.JSON(http.StatusNotFound, gin.H{"error": "project not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch project"})
+		return
+	}
+
+	config := models.ProjectConfig{
+		ProjectID: project.ID.Hex(),
+		SeedURLs:  []string{entry.URL},
+		UseJS:     project.UseJS,
+		MaxPages:  project.MaxPages,
+	}
+
+	// Assign a stable ID so the task payload can reference it.
 	entry.ID = bson.NewObjectID()
 	entry.Status = models.QueueStatusPending
 	entry.EnqueuedAt = time.Now().UTC()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	// Build and dispatch the asynq task.
+	var (
+		task *asynq.Task
+		err  error
+	)
+	switch entry.TaskType {
+	case models.QueueTaskTypeRender:
+		task, err = worker.NewCrawlRenderTask(entry.ID.Hex(), config)
+	default:
+		task, err = worker.NewCrawlSEOTask(entry.ID.Hex(), config)
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to build crawl task"})
+		return
+	}
 
-	if _, err := h.col().InsertOne(ctx, entry); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to enqueue URL"})
+	info, err := h.asynqClient.EnqueueContext(ctx, task)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to dispatch crawl task: " + err.Error()})
+		return
+	}
+	entry.AsynqTaskID = info.ID
+
+	// Persist the queue entry after successful dispatch.
+	if _, err = h.col().InsertOne(ctx, entry); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to store queue entry"})
 		return
 	}
 	c.JSON(http.StatusCreated, entry)

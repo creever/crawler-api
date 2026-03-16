@@ -23,6 +23,24 @@ services:
     networks:
       - crawler-bridge
 
+  # ── Redis (asynq task queue) ─────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: crawler-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - crawler-bridge
+
   # ── Crawler API ──────────────────────────────────────────────────────────────
   api:
     build:
@@ -33,6 +51,8 @@ services:
     depends_on:
       mongo:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       MONGO_URI: mongodb://${MONGO_ROOT_USER:-admin}:${MONGO_ROOT_PASSWORD:-changeme}@mongo:27017/${MONGO_DB:-crawler}?authSource=admin
       MONGO_DB: ${MONGO_DB:-crawler}
@@ -40,6 +60,7 @@ services:
       GIN_MODE: ${GIN_MODE:-release}
       # Restrict CORS origins for production: CORS_ORIGINS=https://your-ui.example.com
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      REDIS_ADDR: ${REDIS_ADDR:-redis:6379}
     ports:
       - "${SERVER_PORT:-9090}:9090"
     networks:
@@ -47,6 +68,7 @@ services:
 
 volumes:
   mongo_data:
+  redis_data:
 
 networks:
   crawler-bridge:

@@ -11,6 +11,7 @@ type Config struct {
 	ServerPort  string
 	GinMode     string
 	CORSOrigins string
+	RedisAddr   string
 }
 
 // Load returns a Config populated from environment variables with sensible defaults
@@ -21,6 +22,7 @@ func Load() *Config {
 		ServerPort:  getEnv("SERVER_PORT", "9090"),
 		GinMode:     getEnv("GIN_MODE", "debug"),
 		CORSOrigins: getEnv("CORS_ORIGINS", "*"),
+		RedisAddr:   getEnv("REDIS_ADDR", "localhost:6379"),
 	}
 }
 
