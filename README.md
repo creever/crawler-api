@@ -68,7 +68,7 @@ All endpoints are prefixed with `/api/v1`.
 ```bash
 # Prerequisites: Go 1.25+ and a running MongoDB instance
 
-export MONGO_URI="mongodb://localhost:27017"
+export MONGO_URI="mongodb://localhost:9090"
 export MONGO_DB="crawler"
 export GIN_MODE="debug"
 
