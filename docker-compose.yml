@@ -11,7 +11,7 @@ services:
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-changeme}
       MONGO_INITDB_DATABASE: ${MONGO_DB:-crawler}
     ports:
-      - "9090:27017"
+      - "27017:27017"
     volumes:
       - mongo_data:/data/db
     healthcheck:
@@ -34,12 +34,12 @@ services:
     environment:
       MONGO_URI: mongodb://${MONGO_ROOT_USER:-admin}:${MONGO_ROOT_PASSWORD:-changeme}@mongo:27017/${MONGO_DB:-crawler}?authSource=admin
       MONGO_DB: ${MONGO_DB:-crawler}
-      SERVER_PORT: ${SERVER_PORT:-8080}
+      SERVER_PORT: ${SERVER_PORT:-9090}
       GIN_MODE: ${GIN_MODE:-release}
       # Restrict CORS origins for production: CORS_ORIGINS=https://your-ui.example.com
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
     ports:
-      - "${SERVER_PORT:-8080}:8080"
+      - "${SERVER_PORT:-9090}:9090"
 
 volumes:
   mongo_data:

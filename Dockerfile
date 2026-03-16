@@ -23,6 +23,6 @@ WORKDIR /app
 
 COPY --from=builder /crawler-api /app/crawler-api
 
-EXPOSE 8080
+EXPOSE 9090
 
 ENTRYPOINT ["/app/crawler-api"]

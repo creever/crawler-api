@@ -19,8 +19,8 @@ cp .env.example .env   # see Environment variables below
 # 2. Build and start the API + MongoDB
 docker compose up --build -d
 
-# 3. The API is now available at http://localhost:8080
-curl http://localhost:8080/health
+# 3. The API is now available at http://localhost:9090
+curl http://localhost:9090/health
 ```
 
 ### Environment variables
@@ -30,7 +30,7 @@ curl http://localhost:8080/health
 | `MONGO_ROOT_USER`     | `admin`                          | MongoDB root username              |
 | `MONGO_ROOT_PASSWORD` | `changeme`                       | MongoDB root password (**change!**)|
 | `MONGO_DB`            | `crawler`                        | Database name                      |
-| `SERVER_PORT`         | `8080`                           | Port the API listens on            |
+| `SERVER_PORT`         | `9090`                           | Port the API listens on            |
 | `GIN_MODE`            | `release`                        | `debug` or `release`               |
 | `CORS_ORIGINS`        | `*`                              | Allowed CORS origins (comma-separated). Use `*` for dev, restrict for production. |
 
@@ -68,7 +68,7 @@ All endpoints are prefixed with `/api/v1`.
 ```bash
 # Prerequisites: Go 1.25+ and a running MongoDB instance
 
-export MONGO_URI="mongodb://localhost:9090"
+export MONGO_URI="mongodb://localhost:27017"
 export MONGO_DB="crawler"
 export GIN_MODE="debug"
 
