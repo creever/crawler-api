@@ -75,6 +75,7 @@ services:
       # Restrict CORS origins for production: CORS_ORIGINS=https://your-ui.example.com
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
       REDIS_ADDR: ${REDIS_ADDR:-redis:6379}
+      CRAWLER_ADDR: ${CRAWLER_ADDR:-http://crawler}
     ports:
       - "${SERVER_PORT:-9090}:9090"
     networks:

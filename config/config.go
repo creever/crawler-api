@@ -12,6 +12,7 @@ type Config struct {
 	GinMode     string
 	CORSOrigins string
 	RedisAddr   string
+	CrawlerAddr string
 }
 
 // Load returns a Config populated from environment variables with sensible defaults
@@ -23,6 +24,7 @@ func Load() *Config {
 		GinMode:     getEnv("GIN_MODE", "debug"),
 		CORSOrigins: getEnv("CORS_ORIGINS", "*"),
 		RedisAddr:   getEnv("REDIS_ADDR", "localhost:6379"),
+		CrawlerAddr: getEnv("CRAWLER_ADDR", "http://crawler"),
 	}
 }
 

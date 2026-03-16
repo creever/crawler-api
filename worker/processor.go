@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/hibiken/asynq"
@@ -16,13 +19,21 @@ import (
 
 // Processor holds the dependencies needed to execute crawl tasks.
 type Processor struct {
-	db     *mongo.Database
-	logger *zap.Logger
+	db          *mongo.Database
+	logger      *zap.Logger
+	crawlerAddr string
+	httpClient  *http.Client
 }
 
-// NewProcessor creates a Processor wired to the given MongoDB database.
-func NewProcessor(db *mongo.Database, logger *zap.Logger) *Processor {
-	return &Processor{db: db, logger: logger}
+// NewProcessor creates a Processor wired to the given MongoDB database and
+// crawler base URL (e.g. "http://crawler").
+func NewProcessor(db *mongo.Database, logger *zap.Logger, crawlerAddr string) *Processor {
+	return &Processor{
+		db:          db,
+		logger:      logger,
+		crawlerAddr: crawlerAddr,
+		httpClient:  &http.Client{Timeout: 60 * time.Second},
+	}
 }
 
 // Register mounts the task handlers onto the provided ServeMux.
@@ -112,38 +123,104 @@ func (p *Processor) HandleCrawlRender(ctx context.Context, t *asynq.Task) error 
 }
 
 // ---------------------------------------------------------------------------
-// Crawl stubs — replace with real crawler calls (e.g. colly / chromedp).
+// Crawler HTTP calls
 // ---------------------------------------------------------------------------
 
-// runSEOCrawl performs the SEO extraction for every seed URL in the config.
-// TODO: Replace with real crawler implementation.
-func (p *Processor) runSEOCrawl(_ context.Context, config models.ProjectConfig) ([]models.SEOResultPayload, error) {
+// runSEOCrawl calls GET /crawl?url=...&js=... on the crawler bot for every
+// seed URL in the config and returns the parsed SEO results.
+func (p *Processor) runSEOCrawl(ctx context.Context, config models.ProjectConfig) ([]models.SEOResultPayload, error) {
 	now := time.Now().UTC()
 	results := make([]models.SEOResultPayload, 0, len(config.SeedURLs))
-	for _, u := range config.SeedURLs {
-		results = append(results, models.SEOResultPayload{
+	for _, seedURL := range config.SeedURLs {
+		result, err := p.fetchSEO(ctx, seedURL, config.UseJS)
+		if err != nil {
+			return nil, fmt.Errorf("SEO crawl for %s: %w", seedURL, err)
+		}
+		result.ProjectID = config.ProjectID
+		result.CrawledAt = now
+		results = append(results, *result)
+	}
+	return results, nil
+}
+
+// fetchSEO calls GET /crawl?url={u}&js={useJS} and decodes the JSON response
+// into a SEOResultPayload.
+func (p *Processor) fetchSEO(ctx context.Context, rawURL string, useJS bool) (*models.SEOResultPayload, error) {
+	endpoint := fmt.Sprintf("%s/crawl?url=%s&js=%v",
+		p.crawlerAddr,
+		url.QueryEscape(rawURL),
+		useJS,
+	)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build SEO request: %w", err)
+	}
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("SEO request: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("crawler /crawl returned HTTP %s for %s", resp.Status, rawURL)
+	}
+
+	var result models.SEOResultPayload
+	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode SEO response: %w", err)
+	}
+	return &result, nil
+}
+
+// runRenderCrawl calls GET /render?url=...&js=... on the crawler bot for
+// every seed URL in the config and returns the captured HTML payloads.
+func (p *Processor) runRenderCrawl(ctx context.Context, config models.ProjectConfig) ([]models.RenderPayload, error) {
+	now := time.Now().UTC()
+	results := make([]models.RenderPayload, 0, len(config.SeedURLs))
+	for _, seedURL := range config.SeedURLs {
+		html, err := p.fetchRender(ctx, seedURL, config.UseJS)
+		if err != nil {
+			return nil, fmt.Errorf("render crawl for %s: %w", seedURL, err)
+		}
+		results = append(results, models.RenderPayload{
 			ProjectID: config.ProjectID,
 			CrawledAt: now,
-			URL:       u,
+			URL:       seedURL,
+			HTML:      html,
 		})
 	}
 	return results, nil
 }
 
-// runRenderCrawl pre-renders every seed URL via JavaScript and returns the HTML.
-// TODO: Replace with real chromedp/Playwright implementation.
-func (p *Processor) runRenderCrawl(_ context.Context, config models.ProjectConfig) ([]models.RenderPayload, error) {
-	now := time.Now().UTC()
-	results := make([]models.RenderPayload, 0, len(config.SeedURLs))
-	for _, u := range config.SeedURLs {
-		results = append(results, models.RenderPayload{
-			ProjectID: config.ProjectID,
-			CrawledAt: now,
-			URL:       u,
-			HTML:      "",
-		})
+// fetchRender calls GET /render?url={u}&js={useJS} and returns the full HTML
+// body returned by the crawler.
+func (p *Processor) fetchRender(ctx context.Context, rawURL string, useJS bool) (string, error) {
+	endpoint := fmt.Sprintf("%s/render?url=%s&js=%v",
+		p.crawlerAddr,
+		url.QueryEscape(rawURL),
+		useJS,
+	)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", fmt.Errorf("build render request: %w", err)
 	}
-	return results, nil
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("render request: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("crawler /render returned HTTP %s for %s", resp.Status, rawURL)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read render response: %w", err)
+	}
+	return string(body), nil
 }
 
 // ---------------------------------------------------------------------------
