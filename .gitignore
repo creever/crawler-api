@@ -1,0 +1,24 @@
+# Binaries
+crawler-api
+*.exe
+*.out
+
+# Environment files
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+/dist/
+/bin/
+
+# Dependencies (vendor)
+vendor/
