@@ -20,6 +20,8 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+    networks:
+      - crawler-bridge
 
   # ── Crawler API ──────────────────────────────────────────────────────────────
   api:
@@ -40,6 +42,13 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
     ports:
       - "${SERVER_PORT:-9090}:9090"
+    networks:
+      - crawler-bridge
 
 volumes:
   mongo_data:
+
+networks:
+  crawler-bridge:
+    driver: bridge
+    name: crawler-bridge
