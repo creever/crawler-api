@@ -46,12 +46,12 @@ services:
     image: hibiken/asynqmon:latest
     container_name: crawler-asynqmon
     restart: unless-stopped
-    command: ["--redis-addr=redis:6379"]
+    command: ["--redis-addr=redis:6379", "--port=8090"]
     depends_on:
       redis:
         condition: service_healthy
     ports:
-      - "${ASYNQMON_PORT:-8080}:8080"
+      - "${ASYNQMON_PORT:-8090}:8090"
     networks:
       - crawler-bridge
 
@@ -75,7 +75,7 @@ services:
       # Restrict CORS origins for production: CORS_ORIGINS=https://your-ui.example.com
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
       REDIS_ADDR: ${REDIS_ADDR:-redis:6379}
-      CRAWLER_ADDR: ${CRAWLER_ADDR:-http://crawler}
+      CRAWLER_ADDR: ${CRAWLER_ADDR:-http://crawler:8080}
     ports:
       - "${SERVER_PORT:-9090}:9090"
     networks:
