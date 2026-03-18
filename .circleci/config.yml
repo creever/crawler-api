@@ -3,62 +3,62 @@ version: 2.1
 jobs:
   build-and-deploy:
     docker:
-      - image: cimg/go:1.23
+    - image: cimg/go:1.23
 
     steps:
-      - checkout
-      - add_ssh_keys:
+    - checkout
+    - add_ssh_keys:
         fingerprints:
         - "SHA256:S7kLWZ0n6jVzuOySXHUu1yQHWVAu5MAF3JXIFWU9T+A"
-      - run:
+    - run:
         name: Add Crawler Server to known_hosts
-        command: ssh-keyscan -H $DEPLOY_HOST >> ~/.ssh/known_hosts
+            command: ssh-keyscan -H $DEPLOY_HOST >> ~/.ssh/known_hosts
 
-      - restore_cache:
-          keys:
-            - go-mod-{{ checksum "go.sum" }}
+    - restore_cache:
+        keys:
+        - go-mod-{{ checksum "go.sum" }}
 
-      - run:
-          name: Download dependencies
-          command: go mod download
+    - run:
+        name: Download dependencies
+        command: go mod download
 
-      - save_cache:
-          key: go-mod-{{ checksum "go.sum" }}
-          paths:
-            - ~/go/pkg/mod
+    - save_cache:
+        key: go-mod-{{ checksum "go.sum" }}
+        paths:
+        - ~/go/pkg/mod
 
-      - run:
-          name: Run tests
-          command: go test ./...
+    - run:
+        name: Run tests
+        command: go test ./...
 
-      - run:
-          name: Build binary
-          command: |
+    - run:
+        name: Build binary
+        command: |
             GOOS=linux GOARCH=amd64 go build \
-              -ldflags="-s -w" \
-              -o crawler-api \
-              ./cmd/api
+            -ldflags="-s -w" \
+            -o crawler-api \
+            ./cmd/api
 
-      - run:
-          name: Copy binary to server
-          command: |
+    - run:
+        name: Copy binary to server
+        command: |
             scp -o StrictHostKeyChecking=no \
-              crawler-api \
-              $DEPLOY_USER@$DEPLOY_HOST:/tmp/crawler-api
+            crawler-api \
+            $DEPLOY_USER@$DEPLOY_HOST:/tmp/crawler-api
 
-      - run:
-          name: Deploy on server
-          command: |
+    - run:
+        name: Deploy on server
+        command: |
             ssh -o StrictHostKeyChecking=no $DEPLOY_USER@$DEPLOY_HOST \
             'set -e
-              # Replace binary atomically
-              mv /tmp/crawler-api /var/www/crawler/api/crawler-api
-              chmod +x /var/www/crawler/api/crawler-api
-              # Restart service
-              systemctl restart crawler-api
-              # Wait and verify it came up
-              sleep 2
-              systemctl is-active --quiet crawler-api && echo "Deploy OK" || exit 1
+                # Replace binary atomically
+                mv /tmp/crawler-api /var/www/crawler/api/crawler-api
+                chmod +x /var/www/crawler/api/crawler-api
+                # Restart service
+                systemctl restart crawler-api
+                # Wait and verify it came up
+                sleep 2
+                systemctl is-active --quiet crawler-api && echo "Deploy OK" || exit 1
             '
 
 workflows:
