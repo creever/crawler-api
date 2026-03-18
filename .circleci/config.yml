@@ -34,6 +34,10 @@ jobs:
     - run:
         name: Build binary
         command: |
+            if [ "$CIRCLE_BRANCH" = "main" ]; then
+                export CRAWLER_ADDR="http://localhost:8080"
+            fi
+
             GOOS=linux GOARCH=amd64 go build \
             -ldflags="-s -w" \
             -o crawler-api \
