@@ -1,0 +1,91 @@
+version: "3.9"
+
+services:
+  # ── MongoDB ─────────────────────────────────────────────────────────────────
+  mongo:
+    image: mongo:7
+    container_name: crawler-mongo
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-changeme}
+      MONGO_INITDB_DATABASE: ${MONGO_DB:-crawler}
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - crawler-bridge
+
+  # ── Redis (asynq task queue) ─────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: crawler-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - crawler-bridge
+
+  # ── Asynqmon (asynq web UI) ─────────────────────────────────────────────────
+  asynqmon:
+    image: hibiken/asynqmon:latest
+    container_name: crawler-asynqmon
+    restart: unless-stopped
+    command: ["--redis-addr=redis:6379", "--port=8090"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "${ASYNQMON_PORT:-8090}:8090"
+    networks:
+      - crawler-bridge
+
+  # ── Crawler API ──────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: crawler-api
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      MONGO_URI: mongodb://${MONGO_ROOT_USER:-admin}:${MONGO_ROOT_PASSWORD:-changeme}@mongo:27017/${MONGO_DB:-crawler}?authSource=admin
+      MONGO_DB: ${MONGO_DB:-crawler}
+      SERVER_PORT: ${SERVER_PORT:-9090}
+      GIN_MODE: ${GIN_MODE:-release}
+      # Restrict CORS origins for production: CORS_ORIGINS=https://your-ui.example.com
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      REDIS_ADDR: ${REDIS_ADDR:-redis:6379}
+      CRAWLER_ADDR: ${CRAWLER_ADDR:-http://crawler:8080}
+    ports:
+      - "${SERVER_PORT:-9090}:9090"
+    networks:
+      - crawler-bridge
+
+volumes:
+  mongo_data:
+  redis_data:
+
+networks:
+  crawler-bridge:
+    driver: bridge
+    name: crawler-bridge
