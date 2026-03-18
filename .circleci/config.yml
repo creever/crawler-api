@@ -12,7 +12,7 @@ jobs:
         - "SHA256:S7kLWZ0n6jVzuOySXHUu1yQHWVAu5MAF3JXIFWU9T+A"
     - run:
         name: Add Crawler Server to known_hosts
-            command: ssh-keyscan -H $DEPLOY_HOST >> ~/.ssh/known_hosts
+        command: ssh-keyscan -H $DEPLOY_HOST >> ~/.ssh/known_hosts
 
     - restore_cache:
         keys:
