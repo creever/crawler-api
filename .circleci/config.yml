@@ -37,7 +37,7 @@ jobs:
             GOOS=linux GOARCH=amd64 go build \
             -ldflags="-s -w" \
             -o crawler-api \
-            ./cmd/api
+            .
 
     - run:
         name: Copy binary to server
