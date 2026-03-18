@@ -24,7 +24,7 @@ func Load() *Config {
 		GinMode:     getEnv("GIN_MODE", "debug"),
 		CORSOrigins: getEnv("CORS_ORIGINS", "*"),
 		RedisAddr:   getEnv("REDIS_ADDR", "localhost:6379"),
-		CrawlerAddr: getEnv("CRAWLER_ADDR", "http://crawler"),
+		CrawlerAddr: getEnv("CRAWLER_ADDR", "http://localhost:8080"),
 	}
 }
 
