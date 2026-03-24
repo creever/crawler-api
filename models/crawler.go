@@ -47,8 +47,12 @@ type SEOResultPayload struct {
 // pre-rendered by chromedp. The API stores the HTML so it can be served as a
 // pre-render proxy for JavaScript-based URLs.
 type RenderPayload struct {
-	ProjectID string    `json:"project_id"`
-	CrawledAt time.Time `json:"crawled_at"`
-	URL       string    `json:"url"`
-	HTML      string    `json:"html"`
+	ProjectID  string    `json:"project_id"`
+	CrawledAt  time.Time `json:"crawled_at"`
+	URL        string    `json:"url"`
+	HTML       string    `json:"html"`
+	// StatusCode is the HTTP status of the crawled page, conveyed via the
+	// X-Prerender-Status response header from the crawler service.  Defaults
+	// to 200 when the header is absent.
+	StatusCode int       `json:"status_code"`
 }

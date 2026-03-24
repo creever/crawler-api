@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/hibiken/asynq"
@@ -179,23 +180,28 @@ func (p *Processor) runRenderCrawl(ctx context.Context, config models.ProjectCon
 	now := time.Now().UTC()
 	results := make([]models.RenderPayload, 0, len(config.SeedURLs))
 	for _, seedURL := range config.SeedURLs {
-		html, err := p.fetchRender(ctx, seedURL, config.UseJS)
+		html, statusCode, err := p.fetchRender(ctx, seedURL, config.UseJS)
 		if err != nil {
 			return nil, fmt.Errorf("render crawl for %s: %w", seedURL, err)
 		}
 		results = append(results, models.RenderPayload{
-			ProjectID: config.ProjectID,
-			CrawledAt: now,
-			URL:       seedURL,
-			HTML:      html,
+			ProjectID:  config.ProjectID,
+			CrawledAt:  now,
+			URL:        seedURL,
+			HTML:       html,
+			StatusCode: statusCode,
 		})
 	}
 	return results, nil
 }
 
 // fetchRender calls GET /render?url={u}&js={useJS} and returns the full HTML
-// body returned by the crawler.
-func (p *Processor) fetchRender(ctx context.Context, rawURL string, useJS bool) (string, error) {
+// body and the page status code.  The page status code is read from the
+// X-Prerender-Status response header (set by the crawler to convey the
+// original HTTP status of the crawled page without conflicting with the
+// crawler's own 200 success response).  When the header is absent, 200 is
+// assumed.
+func (p *Processor) fetchRender(ctx context.Context, rawURL string, useJS bool) (string, int, error) {
 	endpoint := fmt.Sprintf("%s/render?url=%s&js=%v",
 		p.crawlerAddr,
 		url.QueryEscape(rawURL),
@@ -203,24 +209,32 @@ func (p *Processor) fetchRender(ctx context.Context, rawURL string, useJS bool) 
 	)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return "", fmt.Errorf("build render request: %w", err)
+		return "", 0, fmt.Errorf("build render request: %w", err)
 	}
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("render request: %w", err)
+		return "", 0, fmt.Errorf("render request: %w", err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("crawler /render returned HTTP %s for %s", resp.Status, rawURL)
+		return "", 0, fmt.Errorf("crawler /render returned HTTP %s for %s", resp.Status, rawURL)
+	}
+
+	// Read the actual page status from X-Prerender-Status; default to 200.
+	pageStatus := http.StatusOK
+	if xps := resp.Header.Get("X-Prerender-Status"); xps != "" {
+		if parsed, parseErr := strconv.Atoi(xps); parseErr == nil && parsed > 0 {
+			pageStatus = parsed
+		}
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("read render response: %w", err)
+		return "", 0, fmt.Errorf("read render response: %w", err)
 	}
-	return string(body), nil
+	return string(body), pageStatus, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -276,13 +290,14 @@ func (p *Processor) storeRenderResult(ctx context.Context, results []models.Rend
 			continue
 		}
 		doc := models.CacheEntry{
-			ID:        bson.NewObjectID(),
-			ProjectID: projectOID,
-			URL:       r.URL,
-			FullHTML:  r.HTML,
-			CachedAt:  r.CrawledAt,
-			ExpiresAt: now.Add(24 * time.Hour),
-			UpdatedAt: now,
+			ID:         bson.NewObjectID(),
+			ProjectID:  projectOID,
+			URL:        r.URL,
+			FullHTML:   r.HTML,
+			StatusCode: r.StatusCode,
+			CachedAt:   r.CrawledAt,
+			ExpiresAt:  now.Add(24 * time.Hour),
+			UpdatedAt:  now,
 		}
 		if _, err = col.InsertOne(ctx, doc); err != nil {
 			return fmt.Errorf("store render result for %s: %w", r.URL, err)

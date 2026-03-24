@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -90,8 +91,10 @@ func (h *ServeHandler) Serve(c *gin.Context) {
 
 	// 2. Return immediately if a valid cache entry already exists.
 	if cached, cacheErr := h.lookupCache(ctx, rawURL); cacheErr == nil {
+		pageStatus := cachePageStatus(cached)
+		c.Header("X-Prerender-Status", strconv.Itoa(pageStatus))
 		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(cached.FullHTML))
-		go h.logPrerenderRequest(project.ID, rawURL, userAgent, true, http.StatusOK, time.Since(start))
+		go h.logPrerenderRequest(project.ID, rawURL, userAgent, true, pageStatus, time.Since(start))
 		return
 	}
 
@@ -99,14 +102,16 @@ func (h *ServeHandler) Serve(c *gin.Context) {
 	//    queueing duplicate tasks.
 	existingID, found := h.findInFlightRender(ctx, project.ID, rawURL)
 	if found {
-		html, waitErr := h.waitForRender(ctx, existingID, rawURL)
+		entry, waitErr := h.waitForRender(ctx, existingID, rawURL)
 		if waitErr != nil {
 			h.respondRenderError(c, waitErr)
 			go h.logPrerenderRequest(project.ID, rawURL, userAgent, false, renderErrorStatus(waitErr), time.Since(start))
 			return
 		}
-		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))
-		go h.logPrerenderRequest(project.ID, rawURL, userAgent, false, http.StatusOK, time.Since(start))
+		pageStatus := cachePageStatus(entry)
+		c.Header("X-Prerender-Status", strconv.Itoa(pageStatus))
+		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(entry.FullHTML))
+		go h.logPrerenderRequest(project.ID, rawURL, userAgent, false, pageStatus, time.Since(start))
 		return
 	}
 
@@ -121,14 +126,16 @@ func (h *ServeHandler) Serve(c *gin.Context) {
 	h.enqueueSEO(ctx, project, rawURL) //nolint:errcheck
 
 	// 5. Wait for the render task to finish, then return the HTML.
-	html, waitErr := h.waitForRender(ctx, renderEntryID, rawURL)
+	entry, waitErr := h.waitForRender(ctx, renderEntryID, rawURL)
 	if waitErr != nil {
 		h.respondRenderError(c, waitErr)
 		go h.logPrerenderRequest(project.ID, rawURL, userAgent, false, renderErrorStatus(waitErr), time.Since(start))
 		return
 	}
-	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))
-	go h.logPrerenderRequest(project.ID, rawURL, userAgent, false, http.StatusOK, time.Since(start))
+	pageStatus := cachePageStatus(entry)
+	c.Header("X-Prerender-Status", strconv.Itoa(pageStatus))
+	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(entry.FullHTML))
+	go h.logPrerenderRequest(project.ID, rawURL, userAgent, false, pageStatus, time.Since(start))
 }
 
 // ---------------------------------------------------------------------------
@@ -283,40 +290,49 @@ func (h *ServeHandler) enqueueSEO(ctx context.Context, project *models.Project, 
 
 // waitForRender polls the queue entry until it reaches a terminal state (done
 // or failed) or the context deadline is exceeded.  On success it fetches and
-// returns the rendered HTML from cache_entries.
-func (h *ServeHandler) waitForRender(ctx context.Context, entryID bson.ObjectID, rawURL string) (string, error) {
+// returns the cache entry (including the page status code).
+func (h *ServeHandler) waitForRender(ctx context.Context, entryID bson.ObjectID, rawURL string) (*models.CacheEntry, error) {
 	ticker := time.NewTicker(prerenderPollInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
-			return "", errPrerenderTimeout
+			return nil, errPrerenderTimeout
 		case <-ticker.C:
 			var current models.QueueEntry
 			if err := h.db.Collection("crawl_queue").FindOne(ctx, bson.M{"_id": entryID}).Decode(&current); err != nil {
-				return "", err
+				return nil, err
 			}
 
 			switch current.Status {
 			case models.QueueStatusDone:
-				// Fetch the rendered HTML from the cache.
 				var cacheEntry models.CacheEntry
 				if err := h.db.Collection("cache_entries").FindOne(ctx, bson.M{"url": rawURL}).Decode(&cacheEntry); err != nil {
-					return "", errors.New("render complete but cache entry not found")
+					return nil, errors.New("render complete but cache entry not found")
 				}
-				return cacheEntry.FullHTML, nil
+				return &cacheEntry, nil
 
 			case models.QueueStatusFailed:
 				msg := current.Error
 				if msg == "" {
 					msg = "render task failed"
 				}
-				return "", errors.New(msg)
+				return nil, errors.New(msg)
 			}
 			// Still pending or processing — keep polling.
 		}
 	}
+}
+
+// cachePageStatus returns the HTTP status code stored in a cache entry,
+// defaulting to 200 when the field is unset (e.g. for entries created before
+// X-Prerender-Status support was added).
+func cachePageStatus(entry *models.CacheEntry) int {
+	if entry.StatusCode == 0 {
+		return http.StatusOK
+	}
+	return entry.StatusCode
 }
 
 // ---------------------------------------------------------------------------
