@@ -65,10 +65,12 @@ func main() {
 	routes.Setup(router, database, logger, cfg.CORSOrigins, asynqClient)
 
 	srv := &http.Server{
-		Addr:         ":" + cfg.ServerPort,
-		Handler:      router,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
+		Addr:        ":" + cfg.ServerPort,
+		Handler:     router,
+		ReadTimeout: 15 * time.Second,
+		// WriteTimeout is set to 180 s to accommodate the /prerender endpoint,
+		// which blocks for up to ~120 s while waiting for the crawler to finish.
+		WriteTimeout: 180 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 
