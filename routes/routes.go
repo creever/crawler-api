@@ -31,6 +31,11 @@ func Setup(router *gin.Engine, db *mongo.Database, logger *zap.Logger, corsOrigi
 	settingsH := handlers.NewSettingsHandler(db)
 	cacheH := handlers.NewCacheHandler(db)
 	queueH := handlers.NewQueueHandler(db, asynqClient)
+	serveH := handlers.NewServeHandler(db, asynqClient)
+
+	// Prerender server — synchronous endpoint for nginx proxy.
+	// Usage: GET /prerender?url=https://example.com/page
+	router.GET("/prerender", serveH.Serve)
 
 	api := router.Group("/api/v1")
 	{
