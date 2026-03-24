@@ -13,6 +13,7 @@ import (
 	"github.com/hibiken/asynq"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.uber.org/zap"
 
 	"github.com/creever/crawler-api/models"
@@ -378,6 +379,53 @@ func (p *Processor) HandleCrawlDiscover(ctx context.Context, t *asynq.Task) erro
 	if err != nil {
 		p.setDiscoveryStatus(ctx, payload.DiscoveryID, models.DiscoveryStatusFailed, err.Error())
 		return err
+	}
+
+	// Persist the seed URL's SEO data into cache_entries so it is immediately
+	// visible in the cached-pages view.  An upsert is used so that re-running
+	// discovery refreshes metadata without creating duplicate records.
+	if projectOID, hexErr := bson.ObjectIDFromHex(payload.Config.ProjectID); hexErr == nil {
+		now := time.Now().UTC()
+		seoInfo := models.SEOInfo{
+			Title:           seoResult.Title,
+			MetaDescription: seoResult.MetaDescription,
+			H1Tags:          seoResult.H1,
+			H2Tags:          seoResult.H2,
+			CanonicalURL:    seoResult.Canonical,
+			MetaRobots:      seoResult.Robots,
+			OGTitle:         seoResult.OGTitle,
+			OGDescription:   seoResult.OGDescription,
+			OGImage:         seoResult.OGImage,
+			WordCount:       seoResult.WordCount,
+			InternalLinks:   len(seoResult.InternalLinks),
+			ExternalLinks:   len(seoResult.ExternalLinks),
+		}
+		_, upsertErr := p.db.Collection("cache_entries").UpdateOne(
+			ctx,
+			bson.M{"project_id": projectOID, "url": seedURL},
+			bson.M{
+				"$set": bson.M{
+					"seo":        seoInfo,
+					"updated_at": now,
+					"expires_at": now.Add(24 * time.Hour),
+				},
+				"$setOnInsert": bson.M{
+					"_id":        bson.NewObjectID(),
+					"project_id": projectOID,
+					"url":        seedURL,
+					"full_html":  "",
+					"status_code": http.StatusOK,
+					"cached_at":  now,
+				},
+			},
+			options.UpdateOne().SetUpsert(true),
+		)
+		if upsertErr != nil {
+			p.logger.Warn("discover: failed to upsert cache entry for seed URL",
+				zap.String("url", seedURL),
+				zap.Error(upsertErr),
+			)
+		}
 	}
 
 	// Determine the allowed host so we never crawl external sites.
