@@ -67,6 +67,7 @@ func Setup(router *gin.Engine, db *mongo.Database, logger *zap.Logger, corsOrigi
 		{
 			prerender.GET("", prerenderH.List)
 			prerender.POST("", prerenderH.Create)
+			prerender.GET("/stats", prerenderH.Stats)
 			prerender.GET("/:id", prerenderH.Get)
 			prerender.DELETE("/:id", prerenderH.Delete)
 		}

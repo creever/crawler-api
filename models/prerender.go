@@ -38,3 +38,28 @@ type PrerenderSummary struct {
 	HitRate       float64 `json:"hit_rate_percent"`
 	AvgRenderMs   float64 `json:"avg_render_time_ms"`
 }
+
+// PrerenderListResponse is the paginated list response for the UI log view.
+type PrerenderListResponse struct {
+	Total  int64           `json:"total"`
+	Limit  int64           `json:"limit"`
+	Offset int64           `json:"offset"`
+	Data   []PrerenderData `json:"data"`
+}
+
+// PrerenderRequesterBreakdown holds per-type counts for the stats endpoint.
+type PrerenderRequesterBreakdown struct {
+	Human int64 `json:"human"`
+	Bot   int64 `json:"bot"`
+	AI    int64 `json:"ai"`
+}
+
+// PrerenderStats is a detailed aggregate returned by the stats endpoint.
+type PrerenderStats struct {
+	TotalRequests int64                       `json:"total_requests"`
+	CacheHits     int64                       `json:"cache_hits"`
+	CacheMisses   int64                       `json:"cache_misses"`
+	HitRate       float64                     `json:"hit_rate_percent"`
+	AvgRenderMs   float64                     `json:"avg_render_time_ms"`
+	ByRequester   PrerenderRequesterBreakdown `json:"by_requester"`
+}
