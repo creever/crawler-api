@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -61,6 +62,9 @@ func NewServeHandler(db *mongo.Database, asynqClient *asynq.Client) *ServeHandle
 // @Failure      504  {object}  map[string]string
 // @Router       /prerender [get]
 func (h *ServeHandler) Serve(c *gin.Context) {
+	start := time.Now()
+	userAgent := c.GetHeader("User-Agent")
+
 	rawURL := c.Query("url")
 	if rawURL == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "url query parameter is required"})
@@ -87,6 +91,7 @@ func (h *ServeHandler) Serve(c *gin.Context) {
 	// 2. Return immediately if a valid cache entry already exists.
 	if cached, cacheErr := h.lookupCache(ctx, rawURL); cacheErr == nil {
 		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(cached.FullHTML))
+		go h.logPrerenderRequest(project.ID, rawURL, userAgent, true, http.StatusOK, time.Since(start))
 		return
 	}
 
@@ -97,9 +102,11 @@ func (h *ServeHandler) Serve(c *gin.Context) {
 		html, waitErr := h.waitForRender(ctx, existingID, rawURL)
 		if waitErr != nil {
 			h.respondRenderError(c, waitErr)
+			go h.logPrerenderRequest(project.ID, rawURL, userAgent, false, renderErrorStatus(waitErr), time.Since(start))
 			return
 		}
 		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))
+		go h.logPrerenderRequest(project.ID, rawURL, userAgent, false, http.StatusOK, time.Since(start))
 		return
 	}
 
@@ -117,9 +124,11 @@ func (h *ServeHandler) Serve(c *gin.Context) {
 	html, waitErr := h.waitForRender(ctx, renderEntryID, rawURL)
 	if waitErr != nil {
 		h.respondRenderError(c, waitErr)
+		go h.logPrerenderRequest(project.ID, rawURL, userAgent, false, renderErrorStatus(waitErr), time.Since(start))
 		return
 	}
 	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))
+	go h.logPrerenderRequest(project.ID, rawURL, userAgent, false, http.StatusOK, time.Since(start))
 }
 
 // ---------------------------------------------------------------------------
@@ -320,4 +329,90 @@ func (h *ServeHandler) respondRenderError(c *gin.Context, err error) {
 		return
 	}
 	c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+}
+
+// ---------------------------------------------------------------------------
+// Request logging
+// ---------------------------------------------------------------------------
+
+// renderErrorStatus maps a render error to the corresponding HTTP status code.
+func renderErrorStatus(err error) int {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errPrerenderTimeout) {
+		return http.StatusGatewayTimeout
+	}
+	return http.StatusInternalServerError
+}
+
+// classifyRequester inspects the User-Agent header and returns the appropriate
+// RequesterType: AI crawlers are detected first, then generic bots, with
+// everything else treated as a human visitor.
+func classifyRequester(ua string) models.RequesterType {
+	lower := strings.ToLower(ua)
+
+	// Well-known AI crawlers / LLM-related user agents.
+	aiAgents := []string{
+		"gptbot", "chatgpt-user", "oai-searchbot",
+		"claudebot", "claude-web", "anthropic",
+		"ccbot",
+		"perplexitybot",
+		"googleother",
+		"bard",
+		"cohere",
+		"meta-externalagent",
+	}
+	for _, agent := range aiAgents {
+		if strings.Contains(lower, agent) {
+			return models.RequesterTypeAI
+		}
+	}
+
+	// Generic bots / crawlers / spiders.
+	botKeywords := []string{
+		"bot", "crawler", "spider",
+		"slurp",   // Yahoo
+		"baidu",   // Baidu
+		"yandex",  // Yandex
+		"duckduck", // DuckDuckGo
+		"sogou",   // Sogou
+		"exabot",  // Exabot
+		"facebot",
+		"ia_archiver", // Wayback Machine
+		"scraper",
+		"curl", "wget", "python-requests", "go-http-client",
+	}
+	for _, kw := range botKeywords {
+		if strings.Contains(lower, kw) {
+			return models.RequesterTypeBot
+		}
+	}
+
+	return models.RequesterTypeHuman
+}
+
+// logPrerenderRequest inserts a PrerenderData record into prerender_data.
+// It is intended to be called as a goroutine so it does not block the response.
+func (h *ServeHandler) logPrerenderRequest(
+	projectID bson.ObjectID,
+	rawURL string,
+	userAgent string,
+	fromCache bool,
+	statusCode int,
+	elapsed time.Duration,
+) {
+	record := models.PrerenderData{
+		ID:            bson.NewObjectID(),
+		ProjectID:     projectID,
+		URL:           rawURL,
+		StatusCode:    statusCode,
+		RenderTimeMs:  elapsed.Milliseconds(),
+		FromCache:     fromCache,
+		UserAgent:     userAgent,
+		RequesterType: classifyRequester(userAgent),
+		CachedAt:      time.Now().UTC(),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, _ = h.db.Collection("prerender_data").InsertOne(ctx, record)
 }

@@ -28,10 +28,11 @@ func (h *PrerenderHandler) col() *mongo.Collection {
 }
 
 // List godoc
-// @Summary      List prerender records (optionally filtered by project)
+// @Summary      List prerender records (optionally filtered by project and/or requester type)
 // @Tags         prerender
 // @Produce      json
-// @Param        project_id  query  string  false  "Project ID filter"
+// @Param        project_id     query  string  false  "Project ID filter"
+// @Param        requester_type query  string  false  "Requester type filter: human | bot | ai"
 // @Success      200  {array}   models.PrerenderData
 // @Router       /api/v1/prerender [get]
 func (h *PrerenderHandler) List(c *gin.Context) {
@@ -43,6 +44,15 @@ func (h *PrerenderHandler) List(c *gin.Context) {
 			return
 		}
 		filter["project_id"] = oid
+	}
+	if rt := c.Query("requester_type"); rt != "" {
+		switch models.RequesterType(rt) {
+		case models.RequesterTypeHuman, models.RequesterTypeBot, models.RequesterTypeAI:
+			filter["requester_type"] = models.RequesterType(rt)
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid requester_type: must be one of human, bot, ai"})
+			return
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
