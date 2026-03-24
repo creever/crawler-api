@@ -26,14 +26,17 @@ type SEOInfo struct {
 // CacheEntry represents a prerendered and cached page, combining the full
 // HTML output with extracted SEO information.
 type CacheEntry struct {
-	ID        bson.ObjectID `bson:"_id,omitempty" json:"id,omitempty"`
-	ProjectID bson.ObjectID `bson:"project_id"    json:"project_id"    binding:"required"`
-	URL       string        `bson:"url"           json:"url"           binding:"required"`
-	FullHTML  string        `bson:"full_html"     json:"full_html"`
-	SEO       SEOInfo       `bson:"seo"           json:"seo"`
-	CachedAt  time.Time     `bson:"cached_at"     json:"cached_at"`
-	ExpiresAt time.Time     `bson:"expires_at"    json:"expires_at"`
-	UpdatedAt time.Time     `bson:"updated_at"    json:"updated_at"`
+	ID         bson.ObjectID `bson:"_id,omitempty" json:"id,omitempty"`
+	ProjectID  bson.ObjectID `bson:"project_id"    json:"project_id"    binding:"required"`
+	URL        string        `bson:"url"           json:"url"           binding:"required"`
+	FullHTML   string        `bson:"full_html"     json:"full_html"`
+	SEO        SEOInfo       `bson:"seo"           json:"seo"`
+	// StatusCode is the HTTP status of the original crawled page as reported
+	// by the crawler via the X-Prerender-Status response header.
+	StatusCode int           `bson:"status_code"   json:"status_code"`
+	CachedAt   time.Time     `bson:"cached_at"     json:"cached_at"`
+	ExpiresAt  time.Time     `bson:"expires_at"    json:"expires_at"`
+	UpdatedAt  time.Time     `bson:"updated_at"    json:"updated_at"`
 }
 
 // CacheEntryUpdateInput holds the fields that can be refreshed on an existing
