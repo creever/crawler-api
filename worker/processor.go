@@ -91,6 +91,8 @@ func (p *Processor) HandleCrawlSEO(ctx context.Context, t *asynq.Task) error {
 		return err
 	}
 
+	p.storeSEOInCache(ctx, result)
+
 	p.setQueueStatus(ctx, payload.QueueEntryID, models.QueueStatusDone, "")
 	p.logger.Info("crawl:seo task completed", zap.String("queue_entry_id", payload.QueueEntryID))
 	return nil
@@ -282,6 +284,61 @@ func (p *Processor) storeSEOResult(ctx context.Context, results []models.SEOResu
 	return nil
 }
 
+// storeSEOInCache upserts SEO metadata into cache_entries for each result in
+// the slice.  An upsert keyed on (project_id, url) ensures re-runs refresh
+// metadata without creating duplicate records.  Individual failures are logged
+// as warnings and do not abort the caller.
+func (p *Processor) storeSEOInCache(ctx context.Context, results []models.SEOResultPayload) {
+	now := time.Now().UTC()
+	for _, r := range results {
+		projectOID, err := bson.ObjectIDFromHex(r.ProjectID)
+		if err != nil {
+			p.logger.Warn("storeSEOInCache: invalid project_id, skipping", zap.String("project_id", r.ProjectID))
+			continue
+		}
+		seoInfo := models.SEOInfo{
+			Title:           r.Title,
+			MetaDescription: r.MetaDescription,
+			H1Tags:          r.H1,
+			H2Tags:          r.H2,
+			CanonicalURL:    r.Canonical,
+			MetaRobots:      r.Robots,
+			OGTitle:         r.OGTitle,
+			OGDescription:   r.OGDescription,
+			OGImage:         r.OGImage,
+			WordCount:       r.WordCount,
+			InternalLinks:   len(r.InternalLinks),
+			ExternalLinks:   len(r.ExternalLinks),
+		}
+		_, upsertErr := p.db.Collection("cache_entries").UpdateOne(
+			ctx,
+			bson.M{"project_id": projectOID, "url": r.URL},
+			bson.M{
+				"$set": bson.M{
+					"seo":        seoInfo,
+					"updated_at": now,
+					"expires_at": now.Add(24 * time.Hour),
+				},
+				"$setOnInsert": bson.M{
+					"_id":         bson.NewObjectID(),
+					"project_id":  projectOID,
+					"url":         r.URL,
+					"full_html":   "",
+					"status_code": http.StatusOK,
+					"cached_at":   now,
+				},
+			},
+			options.UpdateOne().SetUpsert(true),
+		)
+		if upsertErr != nil {
+			p.logger.Warn("storeSEOInCache: failed to upsert cache entry",
+				zap.String("url", r.URL),
+				zap.Error(upsertErr),
+			)
+		}
+	}
+}
+
 func (p *Processor) storeRenderResult(ctx context.Context, results []models.RenderPayload) error {
 	if len(results) == 0 {
 		return nil
@@ -382,51 +439,9 @@ func (p *Processor) HandleCrawlDiscover(ctx context.Context, t *asynq.Task) erro
 	}
 
 	// Persist the seed URL's SEO data into cache_entries so it is immediately
-	// visible in the cached-pages view.  An upsert is used so that re-running
-	// discovery refreshes metadata without creating duplicate records.
-	if projectOID, hexErr := bson.ObjectIDFromHex(payload.Config.ProjectID); hexErr == nil {
-		now := time.Now().UTC()
-		seoInfo := models.SEOInfo{
-			Title:           seoResult.Title,
-			MetaDescription: seoResult.MetaDescription,
-			H1Tags:          seoResult.H1,
-			H2Tags:          seoResult.H2,
-			CanonicalURL:    seoResult.Canonical,
-			MetaRobots:      seoResult.Robots,
-			OGTitle:         seoResult.OGTitle,
-			OGDescription:   seoResult.OGDescription,
-			OGImage:         seoResult.OGImage,
-			WordCount:       seoResult.WordCount,
-			InternalLinks:   len(seoResult.InternalLinks),
-			ExternalLinks:   len(seoResult.ExternalLinks),
-		}
-		_, upsertErr := p.db.Collection("cache_entries").UpdateOne(
-			ctx,
-			bson.M{"project_id": projectOID, "url": seedURL},
-			bson.M{
-				"$set": bson.M{
-					"seo":        seoInfo,
-					"updated_at": now,
-					"expires_at": now.Add(24 * time.Hour),
-				},
-				"$setOnInsert": bson.M{
-					"_id":        bson.NewObjectID(),
-					"project_id": projectOID,
-					"url":        seedURL,
-					"full_html":  "",
-					"status_code": http.StatusOK,
-					"cached_at":  now,
-				},
-			},
-			options.UpdateOne().SetUpsert(true),
-		)
-		if upsertErr != nil {
-			p.logger.Warn("discover: failed to upsert cache entry for seed URL",
-				zap.String("url", seedURL),
-				zap.Error(upsertErr),
-			)
-		}
-	}
+	// visible in the cached-pages view.
+	seoResult.ProjectID = payload.Config.ProjectID
+	p.storeSEOInCache(ctx, []models.SEOResultPayload{*seoResult})
 
 	// Determine the allowed host so we never crawl external sites.
 	parsedSeed, err := url.Parse(seedURL)
