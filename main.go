@@ -48,7 +48,7 @@ func main() {
 	// Asynq worker server
 	asynqSrv := worker.NewServer(cfg.RedisAddr, logger)
 	mux := asynq.NewServeMux()
-	worker.NewProcessor(database, logger, cfg.CrawlerAddr).Register(mux)
+	worker.NewProcessor(database, logger, cfg.CrawlerAddr, asynqClient).Register(mux)
 
 	go func() {
 		logger.Info("Starting asynq worker", zap.String("redis", cfg.RedisAddr))
