@@ -32,6 +32,7 @@ func Setup(router *gin.Engine, db *mongo.Database, logger *zap.Logger, corsOrigi
 	cacheH := handlers.NewCacheHandler(db)
 	queueH := handlers.NewQueueHandler(db, asynqClient)
 	serveH := handlers.NewServeHandler(db, asynqClient)
+	discoveryH := handlers.NewDiscoveryHandler(db, asynqClient)
 
 	// Prerender server — synchronous endpoint for nginx proxy.
 	// Usage: GET /prerender?url=https://example.com/page
@@ -98,6 +99,15 @@ func Setup(router *gin.Engine, db *mongo.Database, logger *zap.Logger, corsOrigi
 			queue.GET("/:id", queueH.Get)
 			queue.PATCH("/:id", queueH.UpdateStatus)
 			queue.DELETE("/:id", queueH.Delete)
+		}
+
+		// Discovery
+		discover := api.Group("/discover")
+		{
+			discover.GET("", discoveryH.List)
+			discover.POST("", discoveryH.Start)
+			discover.GET("/:id", discoveryH.Get)
+			discover.DELETE("/:id", discoveryH.Delete)
 		}
 	}
 }

@@ -31,11 +31,12 @@ func (h *QueueHandler) col() *mongo.Collection {
 }
 
 // List godoc
-// @Summary      List crawl queue entries (optionally filtered by project or status)
+// @Summary      List crawl queue entries (optionally filtered by project, discovery, or status)
 // @Tags         queue
 // @Produce      json
-// @Param        project_id  query  string  false  "Project ID filter"
-// @Param        status      query  string  false  "Status filter (pending|processing|done|failed)"
+// @Param        project_id    query  string  false  "Project ID filter"
+// @Param        discovery_id  query  string  false  "Discovery ID filter"
+// @Param        status        query  string  false  "Status filter (pending|processing|done|failed)"
 // @Success      200  {array}   models.QueueEntry
 // @Router       /api/v1/queue [get]
 func (h *QueueHandler) List(c *gin.Context) {
@@ -47,6 +48,14 @@ func (h *QueueHandler) List(c *gin.Context) {
 			return
 		}
 		filter["project_id"] = oid
+	}
+	if did := c.Query("discovery_id"); did != "" {
+		oid, err := bson.ObjectIDFromHex(did)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid discovery_id"})
+			return
+		}
+		filter["discovery_id"] = oid
 	}
 	if status := c.Query("status"); status != "" {
 		filter["status"] = status

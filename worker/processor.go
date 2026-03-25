@@ -13,6 +13,7 @@ import (
 	"github.com/hibiken/asynq"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.uber.org/zap"
 
 	"github.com/creever/crawler-api/models"
@@ -24,16 +25,19 @@ type Processor struct {
 	logger      *zap.Logger
 	crawlerAddr string
 	httpClient  *http.Client
+	asynqClient *asynq.Client
 }
 
-// NewProcessor creates a Processor wired to the given MongoDB database and
-// crawler base URL (e.g. "http://crawler").
-func NewProcessor(db *mongo.Database, logger *zap.Logger, crawlerAddr string) *Processor {
+// NewProcessor creates a Processor wired to the given MongoDB database,
+// crawler base URL (e.g. "http://crawler"), and asynq client for re-enqueuing
+// child tasks during discovery.
+func NewProcessor(db *mongo.Database, logger *zap.Logger, crawlerAddr string, asynqClient *asynq.Client) *Processor {
 	return &Processor{
 		db:          db,
 		logger:      logger,
 		crawlerAddr: crawlerAddr,
 		httpClient:  &http.Client{Timeout: 60 * time.Second},
+		asynqClient: asynqClient,
 	}
 }
 
@@ -41,6 +45,7 @@ func NewProcessor(db *mongo.Database, logger *zap.Logger, crawlerAddr string) *P
 func (p *Processor) Register(mux *asynq.ServeMux) {
 	mux.HandleFunc(TypeCrawlSEO, p.HandleCrawlSEO)
 	mux.HandleFunc(TypeCrawlRender, p.HandleCrawlRender)
+	mux.HandleFunc(TypeCrawlDiscover, p.HandleCrawlDiscover)
 }
 
 // NewServer creates a pre-configured asynq.Server backed by Redis at redisAddr.
@@ -85,6 +90,8 @@ func (p *Processor) HandleCrawlSEO(ctx context.Context, t *asynq.Task) error {
 		p.setQueueStatus(ctx, payload.QueueEntryID, models.QueueStatusFailed, err.Error())
 		return err
 	}
+
+	p.storeSEOInCache(ctx, result)
 
 	p.setQueueStatus(ctx, payload.QueueEntryID, models.QueueStatusDone, "")
 	p.logger.Info("crawl:seo task completed", zap.String("queue_entry_id", payload.QueueEntryID))
@@ -277,6 +284,61 @@ func (p *Processor) storeSEOResult(ctx context.Context, results []models.SEOResu
 	return nil
 }
 
+// storeSEOInCache upserts SEO metadata into cache_entries for each result in
+// the slice.  An upsert keyed on (project_id, url) ensures re-runs refresh
+// metadata without creating duplicate records.  Individual failures are logged
+// as warnings and do not abort the caller.
+func (p *Processor) storeSEOInCache(ctx context.Context, results []models.SEOResultPayload) {
+	now := time.Now().UTC()
+	for _, r := range results {
+		projectOID, err := bson.ObjectIDFromHex(r.ProjectID)
+		if err != nil {
+			p.logger.Warn("storeSEOInCache: invalid project_id, skipping", zap.String("project_id", r.ProjectID))
+			continue
+		}
+		seoInfo := models.SEOInfo{
+			Title:           r.Title,
+			MetaDescription: r.MetaDescription,
+			H1Tags:          r.H1,
+			H2Tags:          r.H2,
+			CanonicalURL:    r.Canonical,
+			MetaRobots:      r.Robots,
+			OGTitle:         r.OGTitle,
+			OGDescription:   r.OGDescription,
+			OGImage:         r.OGImage,
+			WordCount:       r.WordCount,
+			InternalLinks:   len(r.InternalLinks),
+			ExternalLinks:   len(r.ExternalLinks),
+		}
+		_, upsertErr := p.db.Collection("cache_entries").UpdateOne(
+			ctx,
+			bson.M{"project_id": projectOID, "url": r.URL},
+			bson.M{
+				"$set": bson.M{
+					"seo":        seoInfo,
+					"updated_at": now,
+					"expires_at": now.Add(24 * time.Hour),
+				},
+				"$setOnInsert": bson.M{
+					"_id":         bson.NewObjectID(),
+					"project_id":  projectOID,
+					"url":         r.URL,
+					"full_html":   "",
+					"status_code": http.StatusOK,
+					"cached_at":   now,
+				},
+			},
+			options.UpdateOne().SetUpsert(true),
+		)
+		if upsertErr != nil {
+			p.logger.Warn("storeSEOInCache: failed to upsert cache entry",
+				zap.String("url", r.URL),
+				zap.Error(upsertErr),
+			)
+		}
+	}
+}
+
 func (p *Processor) storeRenderResult(ctx context.Context, results []models.RenderPayload) error {
 	if len(results) == 0 {
 		return nil
@@ -336,6 +398,211 @@ func (p *Processor) setQueueStatus(ctx context.Context, queueEntryID string, sta
 	); err != nil {
 		p.logger.Error("setQueueStatus: failed to update queue entry",
 			zap.String("id", queueEntryID),
+			zap.Error(err),
+		)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Discovery task
+// ---------------------------------------------------------------------------
+
+// HandleCrawlDiscover processes a crawl:discover task.
+// It crawls the project root URL to discover all internal links, caps the list
+// at MaxPages (default 10), filters out off-host URLs, then enqueues a
+// crawl:seo job for every discovered URL and records them on the Discovery doc.
+func (p *Processor) HandleCrawlDiscover(ctx context.Context, t *asynq.Task) error {
+	var payload DiscoverPayload
+	if err := json.Unmarshal(t.Payload(), &payload); err != nil {
+		return fmt.Errorf("%w: unmarshal crawl:discover payload: %v", asynq.SkipRetry, err)
+	}
+
+	p.logger.Info("processing crawl:discover task",
+		zap.String("discovery_id", payload.DiscoveryID),
+		zap.Strings("seed_urls", payload.Config.SeedURLs),
+	)
+
+	if len(payload.Config.SeedURLs) == 0 {
+		p.setDiscoveryStatus(ctx, payload.DiscoveryID, models.DiscoveryStatusFailed, "no seed URLs provided")
+		return fmt.Errorf("%w: no seed URLs in discover payload", asynq.SkipRetry)
+	}
+
+	p.setDiscoveryStatus(ctx, payload.DiscoveryID, models.DiscoveryStatusRunning, "")
+
+	seedURL := payload.Config.SeedURLs[0]
+
+	// Fetch the root page to get its internal links.
+	seoResult, err := p.fetchSEO(ctx, seedURL, payload.Config.UseJS)
+	if err != nil {
+		p.setDiscoveryStatus(ctx, payload.DiscoveryID, models.DiscoveryStatusFailed, err.Error())
+		return err
+	}
+
+	// Persist the seed URL's SEO data into cache_entries so it is immediately
+	// visible in the cached-pages view.
+	seoResult.ProjectID = payload.Config.ProjectID
+	p.storeSEOInCache(ctx, []models.SEOResultPayload{*seoResult})
+
+	// Determine the allowed host so we never crawl external sites.
+	parsedSeed, err := url.Parse(seedURL)
+	if err != nil {
+		p.setDiscoveryStatus(ctx, payload.DiscoveryID, models.DiscoveryStatusFailed, "invalid seed URL: "+err.Error())
+		return fmt.Errorf("%w: parse seed URL: %v", asynq.SkipRetry, err)
+	}
+	seedHost := parsedSeed.Host
+
+	// Determine the effective page limit (default 10).
+	maxPages := payload.Config.MaxPages
+	if maxPages <= 0 {
+		maxPages = 10
+	}
+
+	// Collect URLs: seed first, then internal links – deduplicated, same-host only.
+	seen := make(map[string]struct{})
+	var urls []string
+
+	tryAdd := func(rawURL string) {
+		if len(urls) >= maxPages {
+			return
+		}
+		parsed, parseErr := url.Parse(rawURL)
+		if parseErr != nil {
+			return
+		}
+		// Resolve relative references against the seed URL.
+		if !parsed.IsAbs() {
+			parsed = parsedSeed.ResolveReference(parsed)
+		}
+		// Reject off-host URLs.
+		if parsed.Host != seedHost {
+			return
+		}
+		// Drop fragment so #section variants collapse to the same page.
+		parsed.Fragment = ""
+		normalized := parsed.String()
+		if _, exists := seen[normalized]; exists {
+			return
+		}
+		seen[normalized] = struct{}{}
+		urls = append(urls, normalized)
+	}
+
+	tryAdd(seedURL)
+	for _, link := range seoResult.InternalLinks {
+		tryAdd(link)
+	}
+
+	// Parse the discovery and project ObjectIDs once.
+	discoveryOID, err := bson.ObjectIDFromHex(payload.DiscoveryID)
+	if err != nil {
+		p.setDiscoveryStatus(ctx, payload.DiscoveryID, models.DiscoveryStatusFailed, "invalid discovery_id")
+		return fmt.Errorf("%w: invalid discovery_id: %v", asynq.SkipRetry, err)
+	}
+
+	projectOID, err := bson.ObjectIDFromHex(payload.Config.ProjectID)
+	if err != nil {
+		p.setDiscoveryStatus(ctx, payload.DiscoveryID, models.DiscoveryStatusFailed, "invalid project_id")
+		return fmt.Errorf("%w: invalid project_id: %v", asynq.SkipRetry, err)
+	}
+
+	// Enqueue a crawl:seo task for every discovered URL.
+	now := time.Now().UTC()
+	var queueEntryIDs []string
+
+	for _, u := range urls {
+		entryID := bson.NewObjectID()
+		entry := models.QueueEntry{
+			ID:          entryID,
+			ProjectID:   projectOID,
+			DiscoveryID: &discoveryOID,
+			URL:         u,
+			TaskType:    models.QueueTaskTypeSEO,
+			Status:      models.QueueStatusPending,
+			EnqueuedAt:  now,
+		}
+
+		seoConfig := models.ProjectConfig{
+			ProjectID: payload.Config.ProjectID,
+			SeedURLs:  []string{u},
+			UseJS:     payload.Config.UseJS,
+			MaxPages:  1,
+		}
+
+		task, taskErr := NewCrawlSEOTask(entryID.Hex(), seoConfig)
+		if taskErr != nil {
+			p.logger.Warn("discover: failed to build seo task", zap.String("url", u), zap.Error(taskErr))
+			continue
+		}
+
+		info, enqErr := p.asynqClient.EnqueueContext(ctx, task)
+		if enqErr != nil {
+			p.logger.Warn("discover: failed to enqueue seo task", zap.String("url", u), zap.Error(enqErr))
+			continue
+		}
+		entry.AsynqTaskID = info.ID
+
+		if _, insErr := p.db.Collection("crawl_queue").InsertOne(ctx, entry); insErr != nil {
+			p.logger.Warn("discover: failed to store queue entry", zap.String("url", u), zap.Error(insErr))
+			continue
+		}
+
+		queueEntryIDs = append(queueEntryIDs, entryID.Hex())
+	}
+
+	// Persist the final state of the discovery document.
+	finishedAt := time.Now().UTC()
+	if _, updErr := p.db.Collection("discoveries").UpdateOne(
+		ctx,
+		bson.M{"_id": discoveryOID},
+		bson.M{"$set": bson.M{
+			"status":          models.DiscoveryStatusDone,
+			"pages_found":     len(queueEntryIDs),
+			"queue_entry_ids": queueEntryIDs,
+			"finished_at":     finishedAt,
+		}},
+	); updErr != nil {
+		p.logger.Error("discover: failed to update discovery",
+			zap.String("id", payload.DiscoveryID),
+			zap.Error(updErr),
+		)
+		return updErr
+	}
+
+	p.logger.Info("crawl:discover task completed",
+		zap.String("discovery_id", payload.DiscoveryID),
+		zap.Int("pages_found", len(queueEntryIDs)),
+	)
+	return nil
+}
+
+// setDiscoveryStatus updates the status (and optionally error + finished_at)
+// of a Discovery document in MongoDB.
+func (p *Processor) setDiscoveryStatus(ctx context.Context, discoveryID string, status models.DiscoveryStatus, errMsg string) {
+	oid, err := bson.ObjectIDFromHex(discoveryID)
+	if err != nil {
+		p.logger.Warn("setDiscoveryStatus: invalid discovery_id", zap.String("id", discoveryID))
+		return
+	}
+
+	update := bson.M{"status": status}
+	if errMsg != "" {
+		update["error"] = errMsg
+	}
+	if status == models.DiscoveryStatusFailed {
+		now := time.Now().UTC()
+		update["finished_at"] = now
+	}
+
+	tctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	if _, err = p.db.Collection("discoveries").UpdateOne(
+		tctx,
+		bson.M{"_id": oid},
+		bson.M{"$set": update},
+	); err != nil {
+		p.logger.Error("setDiscoveryStatus: failed to update discovery",
+			zap.String("id", discoveryID),
 			zap.Error(err),
 		)
 	}
