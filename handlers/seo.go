@@ -157,7 +157,7 @@ func (h *SEOHandler) Delete(c *gin.Context) {
 }
 
 // GetProjectSummary godoc
-// @Summary      Get aggregated SEO summary for a project
+// @Summary      Get aggregated SEO summary for a project based on the most recent discovery run
 // @Tags         seo
 // @Produce      json
 // @Param        id  path  string  true  "Project ID"
@@ -175,12 +175,80 @@ func (h *SEOHandler) GetProjectSummary(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
 	defer cancel()
 
-	// Fetch all SEO records for this project, sorted by word_count desc so the
-	// first N records are already the top pages by content volume.
-	cursor, err := h.col().Find(
+	emptySummary := models.ProjectSeoSummary{
+		ProjectID: c.Param("id"),
+		TopPages:  []models.ProjectSeoTopPage{},
+	}
+
+	// Find the most recent discovery run for this project (any status).
+	var lastDiscovery models.Discovery
+	err = h.db.Collection("discoveries").FindOne(
 		ctx,
 		bson.M{"project_id": projectOID},
-		options.Find().SetSort(bson.D{{Key: "word_count", Value: -1}}),
+		options.FindOne().SetSort(bson.D{{Key: "started_at", Value: -1}}),
+	).Decode(&lastDiscovery)
+	if err == mongo.ErrNoDocuments {
+		c.JSON(http.StatusOK, emptySummary)
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch latest discovery"})
+		return
+	}
+
+	if len(lastDiscovery.QueueEntryIDs) == 0 {
+		c.JSON(http.StatusOK, emptySummary)
+		return
+	}
+
+	// Convert the string queue-entry IDs to ObjectIDs.
+	queueOIDs := make([]bson.ObjectID, 0, len(lastDiscovery.QueueEntryIDs))
+	for _, qid := range lastDiscovery.QueueEntryIDs {
+		if oid, parseErr := bson.ObjectIDFromHex(qid); parseErr == nil {
+			queueOIDs = append(queueOIDs, oid)
+		}
+	}
+
+	// Fetch the URLs that were crawled during that discovery run.
+	type urlDoc struct {
+		URL string `bson:"url"`
+	}
+	qCursor, qErr := h.db.Collection("crawl_queue").Find(
+		ctx,
+		bson.M{"_id": bson.M{"$in": queueOIDs}},
+		options.Find().SetProjection(bson.M{"url": 1}),
+	)
+	if qErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch queue entries"})
+		return
+	}
+	defer qCursor.Close(ctx)
+
+	var urlDocs []urlDoc
+	if qErr = qCursor.All(ctx, &urlDocs); qErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode queue entries"})
+		return
+	}
+
+	crawledURLs := make([]string, 0, len(urlDocs))
+	for _, d := range urlDocs {
+		crawledURLs = append(crawledURLs, d.URL)
+	}
+
+	if len(crawledURLs) == 0 {
+		c.JSON(http.StatusOK, emptySummary)
+		return
+	}
+
+	// Fetch SEO records scoped to the discovered URLs, newest first so that
+	// deduplication by URL always retains the most recent crawl result.
+	cursor, err := h.col().Find(
+		ctx,
+		bson.M{
+			"project_id": projectOID,
+			"url":        bson.M{"$in": crawledURLs},
+		},
+		options.Find().SetSort(bson.D{{Key: "crawled_at", Value: -1}}),
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query seo data"})
@@ -188,10 +256,20 @@ func (h *SEOHandler) GetProjectSummary(c *gin.Context) {
 	}
 	defer cursor.Close(ctx)
 
-	var records []models.SEOData
-	if err = cursor.All(ctx, &records); err != nil {
+	var allRecords []models.SEOData
+	if err = cursor.All(ctx, &allRecords); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode seo data"})
 		return
+	}
+
+	// Deduplicate: keep the most recent record per URL.
+	seenURLs := make(map[string]struct{}, len(allRecords))
+	records := make([]models.SEOData, 0, len(allRecords))
+	for _, r := range allRecords {
+		if _, exists := seenURLs[r.URL]; !exists {
+			seenURLs[r.URL] = struct{}{}
+			records = append(records, r)
+		}
 	}
 
 	summary := models.ProjectSeoSummary{
@@ -239,7 +317,9 @@ func (h *SEOHandler) GetProjectSummary(c *gin.Context) {
 	summary.AvgExternalLinks = float64(totalExternalLinks) / float64(n)
 	summary.AvgLoadTimeMs = float64(totalLoadTimeMs) / float64(n)
 
-	// Top 10 pages by word count (records are already sorted desc).
+	// Sort records by word_count desc to pick the top pages.
+	sortSEOByWordCountDesc(records)
+
 	topN := 10
 	if n < topN {
 		topN = n
@@ -260,4 +340,13 @@ func (h *SEOHandler) GetProjectSummary(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, summary)
+}
+
+// sortSEOByWordCountDesc sorts SEOData records in-place, highest word_count first.
+func sortSEOByWordCountDesc(records []models.SEOData) {
+	for i := 1; i < len(records); i++ {
+		for j := i; j > 0 && records[j].WordCount > records[j-1].WordCount; j-- {
+			records[j], records[j-1] = records[j-1], records[j]
+		}
+	}
 }
