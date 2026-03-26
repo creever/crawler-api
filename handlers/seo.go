@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -157,7 +158,13 @@ func (h *SEOHandler) Delete(c *gin.Context) {
 }
 
 // GetProjectSummary godoc
-// @Summary      Get aggregated SEO summary for a project based on the most recent discovery run
+// @Summary      Live SEO overview for a project – latest crawl result per URL across all sources
+// @Description  Returns the most recent SEO record for every URL that has ever been crawled
+//
+//	for this project (discovery runs AND manual queue entries combined).
+//	Because it always picks the newest crawl result per URL it reflects any
+//	manual re-crawls that happened after the last discovery.
+//
 // @Tags         seo
 // @Produce      json
 // @Param        id  path  string  true  "Project ID"
@@ -175,41 +182,85 @@ func (h *SEOHandler) GetProjectSummary(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
 	defer cancel()
 
+	// Fetch every SEO record for the project, newest first, so deduplication
+	// always retains the most recent crawl result per URL.
+	cursor, err := h.col().Find(
+		ctx,
+		bson.M{"project_id": projectOID},
+		options.Find().SetSort(bson.D{{Key: "crawled_at", Value: -1}}),
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query seo data"})
+		return
+	}
+	defer cursor.Close(ctx)
+
+	var allRecords []models.SEOData
+	if err = cursor.All(ctx, &allRecords); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode seo data"})
+		return
+	}
+
+	records := deduplicateSEOByURL(allRecords)
+	c.JSON(http.StatusOK, buildSeoSummary(c.Param("id"), records))
+}
+
+// GetDiscoverySummary godoc
+// @Summary      SEO summary scoped to a specific discovery run
+// @Description  Returns aggregated SEO statistics computed only from the URLs that were
+//
+//	discovered and crawled during the given discovery run.  Each URL is
+//	represented by its most recent crawl result.
+//
+// @Tags         seo
+// @Produce      json
+// @Param        id  path  string  true  "Discovery ID"
+// @Success      200  {object}  models.ProjectSeoSummary
+// @Failure      400  {object}  map[string]string
+// @Failure      404  {object}  map[string]string
+// @Failure      500  {object}  map[string]string
+// @Router       /api/v1/discover/{id}/seo-summary [get]
+func (h *SEOHandler) GetDiscoverySummary(c *gin.Context) {
+	discoveryOID, err := bson.ObjectIDFromHex(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid discovery id"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+	defer cancel()
+
+	// Load the discovery document to get its project ID and queue entry IDs.
+	var discovery models.Discovery
+	if err = h.db.Collection("discoveries").FindOne(ctx, bson.M{"_id": discoveryOID}).Decode(&discovery); err != nil {
+		if err == mongo.ErrNoDocuments {
+			c.JSON(http.StatusNotFound, gin.H{"error": "discovery not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch discovery"})
+		return
+	}
+
+	projectIDHex := discovery.ProjectID.Hex()
 	emptySummary := models.ProjectSeoSummary{
-		ProjectID: c.Param("id"),
+		ProjectID: projectIDHex,
 		TopPages:  []models.ProjectSeoTopPage{},
 	}
 
-	// Find the most recent discovery run for this project (any status).
-	var lastDiscovery models.Discovery
-	err = h.db.Collection("discoveries").FindOne(
-		ctx,
-		bson.M{"project_id": projectOID},
-		options.FindOne().SetSort(bson.D{{Key: "started_at", Value: -1}}),
-	).Decode(&lastDiscovery)
-	if err == mongo.ErrNoDocuments {
-		c.JSON(http.StatusOK, emptySummary)
-		return
-	}
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch latest discovery"})
-		return
-	}
-
-	if len(lastDiscovery.QueueEntryIDs) == 0 {
+	if len(discovery.QueueEntryIDs) == 0 {
 		c.JSON(http.StatusOK, emptySummary)
 		return
 	}
 
-	// Convert the string queue-entry IDs to ObjectIDs.
-	queueOIDs := make([]bson.ObjectID, 0, len(lastDiscovery.QueueEntryIDs))
-	for _, qid := range lastDiscovery.QueueEntryIDs {
+	// Convert string queue-entry IDs to ObjectIDs.
+	queueOIDs := make([]bson.ObjectID, 0, len(discovery.QueueEntryIDs))
+	for _, qid := range discovery.QueueEntryIDs {
 		if oid, parseErr := bson.ObjectIDFromHex(qid); parseErr == nil {
 			queueOIDs = append(queueOIDs, oid)
 		}
 	}
 
-	// Fetch the URLs that were crawled during that discovery run.
+	// Resolve URLs crawled during this discovery run via the queue entries.
 	type urlDoc struct {
 		URL string `bson:"url"`
 	}
@@ -240,12 +291,11 @@ func (h *SEOHandler) GetProjectSummary(c *gin.Context) {
 		return
 	}
 
-	// Fetch SEO records scoped to the discovered URLs, newest first so that
-	// deduplication by URL always retains the most recent crawl result.
+	// Fetch SEO records for those URLs (project-scoped), newest first.
 	cursor, err := h.col().Find(
 		ctx,
 		bson.M{
-			"project_id": projectOID,
+			"project_id": discovery.ProjectID,
 			"url":        bson.M{"$in": crawledURLs},
 		},
 		options.Find().SetSort(bson.D{{Key: "crawled_at", Value: -1}}),
@@ -262,24 +312,39 @@ func (h *SEOHandler) GetProjectSummary(c *gin.Context) {
 		return
 	}
 
-	// Deduplicate: keep the most recent record per URL.
-	seenURLs := make(map[string]struct{}, len(allRecords))
-	records := make([]models.SEOData, 0, len(allRecords))
-	for _, r := range allRecords {
-		if _, exists := seenURLs[r.URL]; !exists {
-			seenURLs[r.URL] = struct{}{}
-			records = append(records, r)
+	records := deduplicateSEOByURL(allRecords)
+	c.JSON(http.StatusOK, buildSeoSummary(projectIDHex, records))
+}
+
+// ---------------------------------------------------------------------------
+// Shared SEO aggregation helpers
+// ---------------------------------------------------------------------------
+
+// deduplicateSEOByURL keeps only the first (most-recent when sorted crawled_at
+// desc) record per URL from the supplied slice.
+func deduplicateSEOByURL(records []models.SEOData) []models.SEOData {
+	seen := make(map[string]struct{}, len(records))
+	out := make([]models.SEOData, 0, len(records))
+	for _, r := range records {
+		if _, exists := seen[r.URL]; !exists {
+			seen[r.URL] = struct{}{}
+			out = append(out, r)
 		}
 	}
+	return out
+}
 
+// buildSeoSummary aggregates a deduplicated slice of SEOData records into a
+// ProjectSeoSummary.  Records are sorted by word_count desc to select the top
+// pages list.
+func buildSeoSummary(projectID string, records []models.SEOData) models.ProjectSeoSummary {
 	summary := models.ProjectSeoSummary{
-		ProjectID: c.Param("id"),
+		ProjectID: projectID,
 		TopPages:  []models.ProjectSeoTopPage{},
 	}
 
 	if len(records) == 0 {
-		c.JSON(http.StatusOK, summary)
-		return
+		return summary
 	}
 
 	summary.TotalPagesAnalyzed = len(records)
@@ -317,8 +382,10 @@ func (h *SEOHandler) GetProjectSummary(c *gin.Context) {
 	summary.AvgExternalLinks = float64(totalExternalLinks) / float64(n)
 	summary.AvgLoadTimeMs = float64(totalLoadTimeMs) / float64(n)
 
-	// Sort records by word_count desc to pick the top pages.
-	sortSEOByWordCountDesc(records)
+	// Sort by word_count desc to select the top pages.
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].WordCount > records[j].WordCount
+	})
 
 	topN := 10
 	if n < topN {
@@ -339,14 +406,5 @@ func (h *SEOHandler) GetProjectSummary(c *gin.Context) {
 		summary.TopPages = append(summary.TopPages, page)
 	}
 
-	c.JSON(http.StatusOK, summary)
-}
-
-// sortSEOByWordCountDesc sorts SEOData records in-place, highest word_count first.
-func sortSEOByWordCountDesc(records []models.SEOData) {
-	for i := 1; i < len(records); i++ {
-		for j := i; j > 0 && records[j].WordCount > records[j-1].WordCount; j-- {
-			records[j], records[j-1] = records[j-1], records[j]
-		}
-	}
+	return summary
 }

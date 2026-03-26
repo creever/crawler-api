@@ -454,11 +454,11 @@ func (p *Processor) HandleCrawlDiscover(ctx context.Context, t *asynq.Task) erro
 	var workQueue []string
 	var discoveredURLs []string
 
-	// normalizeAndEnqueue resolves, normalises and deduplicates a URL before
+	// tryEnqueue resolves, normalises and deduplicates a URL before
 	// adding it to the BFS work-queue.  It stops accepting new URLs once the
 	// combined size of already-discovered pages and the pending work-queue
 	// reaches maxPages to bound memory usage.
-	normalizeAndEnqueue := func(rawURL string) {
+	tryEnqueue := func(rawURL string) {
 		if len(discoveredURLs)+len(workQueue) >= maxPages {
 			return
 		}
@@ -481,7 +481,7 @@ func (p *Processor) HandleCrawlDiscover(ctx context.Context, t *asynq.Task) erro
 		}
 	}
 
-	normalizeAndEnqueue(seedURL)
+	tryEnqueue(seedURL)
 
 	for len(workQueue) > 0 && len(discoveredURLs) < maxPages {
 		// Dequeue the next URL.
@@ -506,7 +506,7 @@ func (p *Processor) HandleCrawlDiscover(ctx context.Context, t *asynq.Task) erro
 
 		// Enqueue newly discovered internal links for the next BFS wave.
 		for _, link := range seoResult.InternalLinks {
-			normalizeAndEnqueue(link)
+			tryEnqueue(link)
 		}
 	}
 

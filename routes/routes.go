@@ -108,6 +108,7 @@ func Setup(router *gin.Engine, db *mongo.Database, logger *zap.Logger, corsOrigi
 			discover.GET("", discoveryH.List)
 			discover.POST("", discoveryH.Start)
 			discover.GET("/:id", discoveryH.Get)
+			discover.GET("/:id/seo-summary", seoH.GetDiscoverySummary)
 			discover.DELETE("/:id", discoveryH.Delete)
 		}
 	}
