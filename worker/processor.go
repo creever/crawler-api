@@ -260,22 +260,23 @@ func (p *Processor) storeSEOResult(ctx context.Context, results []models.SEOResu
 			continue
 		}
 		doc := models.SEOData{
-			ID:              bson.NewObjectID(),
-			ProjectID:       projectOID,
-			URL:             r.URL,
-			Title:           r.Title,
-			MetaDescription: r.MetaDescription,
-			H1Tags:          r.H1,
-			H2Tags:          r.H2,
-			CanonicalURL:    r.Canonical,
-			MetaRobots:      r.Robots,
-			OGTitle:         r.OGTitle,
-			OGDescription:   r.OGDescription,
-			OGImage:         r.OGImage,
-			WordCount:       r.WordCount,
-			InternalLinks:   len(r.InternalLinks),
-			ExternalLinks:   len(r.ExternalLinks),
-			CrawledAt:       r.CrawledAt,
+			ID:               bson.NewObjectID(),
+			ProjectID:        projectOID,
+			URL:              r.URL,
+			Title:            r.Title,
+			MetaDescription:  r.MetaDescription,
+			H1Tags:           r.H1,
+			H2Tags:           r.H2,
+			CanonicalURL:     r.Canonical,
+			MetaRobots:       r.Robots,
+			OGTitle:          r.OGTitle,
+			OGDescription:    r.OGDescription,
+			OGImage:          r.OGImage,
+			WordCount:        r.WordCount,
+			InternalLinks:    len(r.InternalLinks),
+			ExternalLinks:    len(r.ExternalLinks),
+			ImagesWithoutAlt: r.ImagesWithoutAlt,
+			CrawledAt:        r.CrawledAt,
 		}
 		if _, err = col.InsertOne(ctx, doc); err != nil {
 			return fmt.Errorf("store seo result for %s: %w", r.URL, err)
@@ -408,9 +409,10 @@ func (p *Processor) setQueueStatus(ctx context.Context, queueEntryID string, sta
 // ---------------------------------------------------------------------------
 
 // HandleCrawlDiscover processes a crawl:discover task.
-// It crawls the project root URL to discover all internal links, caps the list
-// at MaxPages (default 10), filters out off-host URLs, then enqueues a
-// crawl:seo job for every discovered URL and records them on the Discovery doc.
+// It performs a recursive BFS crawl starting from the project root URL,
+// following every internal link until all reachable pages (up to MaxPages)
+// have been visited.  A crawl:seo task is enqueued for every discovered URL
+// and the Discovery document is updated with the final result.
 func (p *Processor) HandleCrawlDiscover(ctx context.Context, t *asynq.Task) error {
 	var payload DiscoverPayload
 	if err := json.Unmarshal(t.Payload(), &payload); err != nil {
@@ -431,18 +433,6 @@ func (p *Processor) HandleCrawlDiscover(ctx context.Context, t *asynq.Task) erro
 
 	seedURL := payload.Config.SeedURLs[0]
 
-	// Fetch the root page to get its internal links.
-	seoResult, err := p.fetchSEO(ctx, seedURL, payload.Config.UseJS)
-	if err != nil {
-		p.setDiscoveryStatus(ctx, payload.DiscoveryID, models.DiscoveryStatusFailed, err.Error())
-		return err
-	}
-
-	// Persist the seed URL's SEO data into cache_entries so it is immediately
-	// visible in the cached-pages view.
-	seoResult.ProjectID = payload.Config.ProjectID
-	p.storeSEOInCache(ctx, []models.SEOResultPayload{*seoResult})
-
 	// Determine the allowed host so we never crawl external sites.
 	parsedSeed, err := url.Parse(seedURL)
 	if err != nil {
@@ -457,39 +447,67 @@ func (p *Processor) HandleCrawlDiscover(ctx context.Context, t *asynq.Task) erro
 		maxPages = 10
 	}
 
-	// Collect URLs: seed first, then internal links – deduplicated, same-host only.
+	// BFS crawl: visit each page to collect its internal links, expanding the
+	// frontier until all reachable same-host pages are discovered or maxPages
+	// is reached.
 	seen := make(map[string]struct{})
-	var urls []string
+	var workQueue []string
+	var discoveredURLs []string
 
-	tryAdd := func(rawURL string) {
-		if len(urls) >= maxPages {
+	// normalizeAndEnqueue resolves, normalises and deduplicates a URL before
+	// adding it to the BFS work-queue.  It stops accepting new URLs once the
+	// combined size of already-discovered pages and the pending work-queue
+	// reaches maxPages to bound memory usage.
+	normalizeAndEnqueue := func(rawURL string) {
+		if len(discoveredURLs)+len(workQueue) >= maxPages {
 			return
 		}
 		parsed, parseErr := url.Parse(rawURL)
 		if parseErr != nil {
 			return
 		}
-		// Resolve relative references against the seed URL.
 		if !parsed.IsAbs() {
 			parsed = parsedSeed.ResolveReference(parsed)
 		}
-		// Reject off-host URLs.
 		if parsed.Host != seedHost {
 			return
 		}
 		// Drop fragment so #section variants collapse to the same page.
 		parsed.Fragment = ""
 		normalized := parsed.String()
-		if _, exists := seen[normalized]; exists {
-			return
+		if _, exists := seen[normalized]; !exists {
+			seen[normalized] = struct{}{}
+			workQueue = append(workQueue, normalized)
 		}
-		seen[normalized] = struct{}{}
-		urls = append(urls, normalized)
 	}
 
-	tryAdd(seedURL)
-	for _, link := range seoResult.InternalLinks {
-		tryAdd(link)
+	normalizeAndEnqueue(seedURL)
+
+	for len(workQueue) > 0 && len(discoveredURLs) < maxPages {
+		// Dequeue the next URL.
+		current := workQueue[0]
+		workQueue = workQueue[1:]
+
+		// Fetch SEO data so we can extract internal links for the next BFS wave.
+		seoResult, fetchErr := p.fetchSEO(ctx, current, payload.Config.UseJS)
+		if fetchErr != nil {
+			p.logger.Warn("discover: failed to fetch SEO, adding to queue anyway",
+				zap.String("url", current),
+				zap.Error(fetchErr),
+			)
+			// Still add to discoveredURLs so a crawl:seo task will retry it.
+			discoveredURLs = append(discoveredURLs, current)
+			continue
+		}
+
+		seoResult.ProjectID = payload.Config.ProjectID
+		p.storeSEOInCache(ctx, []models.SEOResultPayload{*seoResult})
+		discoveredURLs = append(discoveredURLs, current)
+
+		// Enqueue newly discovered internal links for the next BFS wave.
+		for _, link := range seoResult.InternalLinks {
+			normalizeAndEnqueue(link)
+		}
 	}
 
 	// Parse the discovery and project ObjectIDs once.
@@ -509,7 +527,7 @@ func (p *Processor) HandleCrawlDiscover(ctx context.Context, t *asynq.Task) erro
 	now := time.Now().UTC()
 	var queueEntryIDs []string
 
-	for _, u := range urls {
+	for _, u := range discoveredURLs {
 		entryID := bson.NewObjectID()
 		entry := models.QueueEntry{
 			ID:          entryID,

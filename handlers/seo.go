@@ -155,3 +155,109 @@ func (h *SEOHandler) Delete(c *gin.Context) {
 	}
 	c.Status(http.StatusNoContent)
 }
+
+// GetProjectSummary godoc
+// @Summary      Get aggregated SEO summary for a project
+// @Tags         seo
+// @Produce      json
+// @Param        id  path  string  true  "Project ID"
+// @Success      200  {object}  models.ProjectSeoSummary
+// @Failure      400  {object}  map[string]string
+// @Failure      500  {object}  map[string]string
+// @Router       /api/v1/projects/{id}/seo-summary [get]
+func (h *SEOHandler) GetProjectSummary(c *gin.Context) {
+	projectOID, err := bson.ObjectIDFromHex(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid project id"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+	defer cancel()
+
+	// Fetch all SEO records for this project, sorted by word_count desc so the
+	// first N records are already the top pages by content volume.
+	cursor, err := h.col().Find(
+		ctx,
+		bson.M{"project_id": projectOID},
+		options.Find().SetSort(bson.D{{Key: "word_count", Value: -1}}),
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query seo data"})
+		return
+	}
+	defer cursor.Close(ctx)
+
+	var records []models.SEOData
+	if err = cursor.All(ctx, &records); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode seo data"})
+		return
+	}
+
+	summary := models.ProjectSeoSummary{
+		ProjectID: c.Param("id"),
+		TopPages:  []models.ProjectSeoTopPage{},
+	}
+
+	if len(records) == 0 {
+		c.JSON(http.StatusOK, summary)
+		return
+	}
+
+	summary.TotalPagesAnalyzed = len(records)
+
+	var totalWordCount, totalInternalLinks, totalExternalLinks int
+	var totalLoadTimeMs int64
+
+	for _, r := range records {
+		totalWordCount += r.WordCount
+		totalInternalLinks += r.InternalLinks
+		totalExternalLinks += r.ExternalLinks
+		totalLoadTimeMs += r.LoadTimeMs
+
+		if r.Title == "" {
+			summary.Issues.MissingTitle++
+		}
+		if r.MetaDescription == "" {
+			summary.Issues.MissingDescription++
+		}
+		if len(r.H1Tags) == 0 {
+			summary.Issues.MissingH1++
+		}
+		if r.CanonicalURL == "" {
+			summary.Issues.MissingCanonical++
+		}
+		summary.Issues.ImagesWithoutAlt += r.ImagesWithoutAlt
+		if r.StatusCode >= 400 {
+			summary.Issues.PagesWithErrors++
+		}
+	}
+
+	n := len(records)
+	summary.AvgWordCount = float64(totalWordCount) / float64(n)
+	summary.AvgInternalLinks = float64(totalInternalLinks) / float64(n)
+	summary.AvgExternalLinks = float64(totalExternalLinks) / float64(n)
+	summary.AvgLoadTimeMs = float64(totalLoadTimeMs) / float64(n)
+
+	// Top 10 pages by word count (records are already sorted desc).
+	topN := 10
+	if n < topN {
+		topN = n
+	}
+	for i := 0; i < topN; i++ {
+		r := records[i]
+		page := models.ProjectSeoTopPage{
+			URL:           r.URL,
+			WordCount:     r.WordCount,
+			InternalLinks: r.InternalLinks,
+			LoadTimeMs:    r.LoadTimeMs,
+		}
+		if r.Title != "" {
+			title := r.Title
+			page.Title = &title
+		}
+		summary.TopPages = append(summary.TopPages, page)
+	}
+
+	c.JSON(http.StatusOK, summary)
+}

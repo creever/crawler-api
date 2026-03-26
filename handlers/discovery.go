@@ -10,6 +10,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.uber.org/zap"
 
 	"github.com/creever/crawler-api/models"
 	"github.com/creever/crawler-api/worker"
@@ -19,11 +20,12 @@ import (
 type DiscoveryHandler struct {
 	db          *mongo.Database
 	asynqClient *asynq.Client
+	logger      *zap.Logger
 }
 
 // NewDiscoveryHandler creates a new DiscoveryHandler.
-func NewDiscoveryHandler(db *mongo.Database, asynqClient *asynq.Client) *DiscoveryHandler {
-	return &DiscoveryHandler{db: db, asynqClient: asynqClient}
+func NewDiscoveryHandler(db *mongo.Database, asynqClient *asynq.Client, logger *zap.Logger) *DiscoveryHandler {
+	return &DiscoveryHandler{db: db, asynqClient: asynqClient, logger: logger}
 }
 
 func (h *DiscoveryHandler) col() *mongo.Collection {
@@ -31,11 +33,11 @@ func (h *DiscoveryHandler) col() *mongo.Collection {
 }
 
 // List godoc
-// @Summary      List discovery runs (optionally filtered by project)
+// @Summary      List discovery runs (optionally filtered by project), including real-time crawl progress
 // @Tags         discovery
 // @Produce      json
 // @Param        project_id  query  string  false  "Project ID filter"
-// @Success      200  {array}   models.Discovery
+// @Success      200  {array}   models.DiscoverySummary
 // @Router       /api/v1/discover [get]
 func (h *DiscoveryHandler) List(c *gin.Context) {
 	filter := bson.M{}
@@ -59,14 +61,82 @@ func (h *DiscoveryHandler) List(c *gin.Context) {
 	}
 	defer cursor.Close(ctx)
 
-	var results []models.Discovery
-	if err = cursor.All(ctx, &results); err != nil {
+	var discoveries []models.Discovery
+	if err = cursor.All(ctx, &discoveries); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode discoveries"})
 		return
 	}
-	if results == nil {
-		results = []models.Discovery{}
+
+	// Collect all discovery ObjectIDs for the queue-count aggregation.
+	discoveryOIDs := make([]bson.ObjectID, 0, len(discoveries))
+	for _, d := range discoveries {
+		discoveryOIDs = append(discoveryOIDs, d.ID)
 	}
+
+	// pageCounts maps discoveryID -> per-status counts.
+	type statusCounts struct{ done, failed, pending int }
+	pageCounts := make(map[bson.ObjectID]*statusCounts, len(discoveries))
+	for _, oid := range discoveryOIDs {
+		pageCounts[oid] = &statusCounts{}
+	}
+
+	if len(discoveryOIDs) > 0 {
+		pipeline := mongo.Pipeline{
+			{{Key: "$match", Value: bson.M{
+				"discovery_id": bson.M{"$in": discoveryOIDs},
+			}}},
+			{{Key: "$group", Value: bson.M{
+				"_id": bson.M{
+					"discovery_id": "$discovery_id",
+					"status":       "$status",
+				},
+				"count": bson.M{"$sum": 1},
+			}}},
+		}
+
+		type aggEntry struct {
+			ID struct {
+				DiscoveryID bson.ObjectID     `bson:"discovery_id"`
+				Status      models.QueueStatus `bson:"status"`
+			} `bson:"_id"`
+			Count int `bson:"count"`
+		}
+
+		aggCursor, aggErr := h.db.Collection("crawl_queue").Aggregate(ctx, pipeline)
+		if aggErr != nil {
+			h.logger.Warn("discovery list: failed to aggregate queue counts", zap.Error(aggErr))
+		} else {
+			defer aggCursor.Close(ctx)
+			var aggResults []aggEntry
+			if aggErr = aggCursor.All(ctx, &aggResults); aggErr != nil {
+				h.logger.Warn("discovery list: failed to decode queue counts", zap.Error(aggErr))
+			}
+			for _, ar := range aggResults {
+				if sc, ok := pageCounts[ar.ID.DiscoveryID]; ok {
+					switch ar.ID.Status {
+					case models.QueueStatusDone:
+						sc.done += ar.Count
+					case models.QueueStatusFailed:
+						sc.failed += ar.Count
+					case models.QueueStatusPending, models.QueueStatusProcessing:
+						sc.pending += ar.Count
+					}
+				}
+			}
+		}
+	}
+
+	results := make([]models.DiscoverySummary, 0, len(discoveries))
+	for _, d := range discoveries {
+		s := models.DiscoverySummary{Discovery: d}
+		if sc, ok := pageCounts[d.ID]; ok {
+			s.PagesDone = sc.done
+			s.PagesFailed = sc.failed
+			s.PagesPending = sc.pending
+		}
+		results = append(results, s)
+	}
+
 	c.JSON(http.StatusOK, results)
 }
 
