@@ -122,8 +122,8 @@ func (h *ServeHandler) Serve(c *gin.Context) {
 		return
 	}
 
-	// Fire-and-forget SEO task so requests are tracked in the analytics DB.
-	h.enqueueSEO(ctx, project, rawURL) //nolint:errcheck
+	// SEO analytics disabled temporarily — prerender returns HTML as fast as possible.
+	// h.enqueueSEO(ctx, project, rawURL)
 
 	// 5. Wait for the render task to finish, then return the HTML.
 	entry, waitErr := h.waitForRender(ctx, renderEntryID, rawURL)
