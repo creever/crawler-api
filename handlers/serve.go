@@ -214,6 +214,10 @@ func (h *ServeHandler) findInFlightRender(ctx context.Context, projectID bson.Ob
 
 // enqueueRender creates a crawl:render queue entry and dispatches the asynq
 // task.  It returns the new entry's ObjectID so the caller can poll its status.
+//
+// The MongoDB entry is inserted before the asynq task is dispatched so that
+// concurrent callers hitting findInFlightRender can observe the pending entry
+// and avoid enqueueing a duplicate render job.
 func (h *ServeHandler) enqueueRender(ctx context.Context, project *models.Project, rawURL string) (bson.ObjectID, error) {
 	config := models.ProjectConfig{
 		ProjectID: project.ID.Hex(),
@@ -232,21 +236,40 @@ func (h *ServeHandler) enqueueRender(ctx context.Context, project *models.Projec
 		EnqueuedAt: time.Now().UTC(),
 	}
 
+	// Insert the queue entry first so findInFlightRender sees it immediately,
+	// preventing a concurrent request from enqueuing a duplicate render task.
+	if _, err := h.db.Collection("crawl_queue").InsertOne(ctx, entry); err != nil {
+		return bson.ObjectID{}, err
+	}
+
 	task, err := worker.NewCrawlRenderTask(entry.ID.Hex(), config)
 	if err != nil {
+		h.markQueueFailed(ctx, entry.ID, err.Error())
 		return bson.ObjectID{}, err
 	}
 
 	info, err := h.asynqClient.EnqueueContext(ctx, task)
 	if err != nil {
+		h.markQueueFailed(ctx, entry.ID, err.Error())
 		return bson.ObjectID{}, err
 	}
-	entry.AsynqTaskID = info.ID
 
-	if _, err = h.db.Collection("crawl_queue").InsertOne(ctx, entry); err != nil {
-		return bson.ObjectID{}, err
-	}
+	// Persist the asynq task ID for observability; non-critical if it fails.
+	_, _ = h.db.Collection("crawl_queue").UpdateOne(ctx,
+		bson.M{"_id": entry.ID},
+		bson.M{"$set": bson.M{"asynq_task_id": info.ID}},
+	)
 	return entry.ID, nil
+}
+
+// markQueueFailed sets a queue entry to the failed state with the given message.
+func (h *ServeHandler) markQueueFailed(ctx context.Context, id bson.ObjectID, errMsg string) {
+	tctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, _ = h.db.Collection("crawl_queue").UpdateOne(tctx,
+		bson.M{"_id": id},
+		bson.M{"$set": bson.M{"status": models.QueueStatusFailed, "error": errMsg}},
+	)
 }
 
 // enqueueSEO creates a crawl:seo queue entry for analytics tracking.
