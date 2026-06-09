@@ -49,6 +49,11 @@ type BlogConfig struct {
 	// ScheduleHours: 0 = manual only, >0 = auto-generate every N hours.
 	ScheduleHours   int        `bson:"schedule_hours"              json:"schedule_hours"`
 	LastGeneratedAt *time.Time `bson:"last_generated_at,omitempty" json:"last_generated_at,omitempty"`
+	// Google Search Console integration (optional).
+	// SearchConsolePropertyURL: "sc-domain:example.com" or "https://example.com/"
+	SearchConsolePropertyURL string `bson:"search_console_property_url" json:"search_console_property_url"`
+	// SearchConsoleCredentials: full Google service account JSON key as a string.
+	SearchConsoleCredentials string `bson:"search_console_credentials" json:"search_console_credentials"`
 	CreatedAt       time.Time  `bson:"created_at" json:"created_at"`
 	UpdatedAt       time.Time  `bson:"updated_at" json:"updated_at"`
 }

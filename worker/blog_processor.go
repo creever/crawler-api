@@ -48,6 +48,18 @@ func (p *Processor) HandleBlogGenerate(ctx context.Context, t *asynq.Task) error
 		return fmt.Errorf("%w: load blog config: %v", asynq.SkipRetry, err)
 	}
 
+	// ── Step 0: Google Search Console (optional) ─────────────────────────────
+	gscContext := ""
+	if cfg.SearchConsolePropertyURL != "" && cfg.SearchConsoleCredentials != "" {
+		p.logger.Info("blog:generate step 0 — Search Console keywords")
+		gscQueries, gscErr := p.fetchGSCKeywords(ctx, cfg.SearchConsoleCredentials, cfg.SearchConsolePropertyURL)
+		if gscErr != nil {
+			p.logger.Warn("blog:generate GSC fetch failed, skipping", zap.Error(gscErr))
+		} else {
+			gscContext = formatGSCContext(gscQueries)
+		}
+	}
+
 	// ── Step 1: Gemini Search Grounding (SERP) ──────────────────────────────
 	p.logger.Info("blog:generate step 1 — Gemini SERP", zap.String("keyword", payload.SeedKeyword))
 	serpSummary, err := p.fetchGeminiSERP(ctx, cfg.GeminiAPIKey, payload.SeedKeyword, payload.Language)
@@ -69,7 +81,7 @@ func (p *Processor) HandleBlogGenerate(ctx context.Context, t *asynq.Task) error
 
 	// ── Step 2: Keyword Clustering ───────────────────────────────────────────
 	p.logger.Info("blog:generate step 2 — keyword clustering")
-	keywords, err := p.clusterKeywords(ctx, callAI, payload.SeedKeyword, payload.Language, serpSummary)
+	keywords, err := p.clusterKeywords(ctx, callAI, payload.SeedKeyword, payload.Language, serpSummary, gscContext)
 	if err != nil {
 		p.logger.Warn("blog:generate keyword clustering failed, using fallback", zap.Error(err))
 		keywords = []models.BlogKeyword{
@@ -281,8 +293,8 @@ func (p *Processor) aiCaller(cfg models.BlogConfig) aiCallFunc {
 // Step 2 — Keyword Clustering
 // ---------------------------------------------------------------------------
 
-func (p *Processor) clusterKeywords(ctx context.Context, call aiCallFunc, keyword, language, serpSummary string) ([]models.BlogKeyword, error) {
-	system := `You are an expert SEO strategist. Based on the seed keyword and SERP research data, return ONLY a valid JSON array (no markdown, no backticks) of 8-10 keyword opportunities.
+func (p *Processor) clusterKeywords(ctx context.Context, call aiCallFunc, keyword, language, serpSummary, gscContext string) ([]models.BlogKeyword, error) {
+	system := `You are an expert SEO strategist. Based on the seed keyword, SERP research data, and (when provided) real Google Search Console data, return ONLY a valid JSON array (no markdown, no backticks) of 8-10 keyword opportunities.
 
 Each object must have exactly:
 - keyword (string, in the same language as the seed keyword)
@@ -290,10 +302,14 @@ Each object must have exactly:
 - difficulty ("Low", "Medium", or "High")
 - intent (exactly one of: "Informational", "Commercial", "Transactional", "Navigational")
 
-Prioritize keywords that naturally emerge from the SERP data. Mix intents. Return only a valid JSON array, nothing else.`
+When GSC data is present, prioritise "content opportunity" keywords (position 4–20) that are semantically related to the seed topic — these are the highest-ROI targets. Return only a valid JSON array, nothing else.`
 
 	userMsg := fmt.Sprintf("Seed keyword: %q\nLanguage: %s\n\nSERP research data:\n%s",
 		keyword, language, truncate(serpSummary, 2000))
+
+	if gscContext != "" {
+		userMsg += "\n\n" + truncate(gscContext, 1500)
+	}
 
 	raw, err := call(ctx, system, userMsg, 1200)
 	if err != nil {
