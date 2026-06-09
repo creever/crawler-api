@@ -150,7 +150,11 @@ func Setup(router *gin.Engine, db *mongo.Database, logger *zap.Logger, corsOrigi
 				}
 			}
 
-			// User management (admin only)
+			// Password reset: any authenticated user can reset their own password;
+			// the handler enforces that non-admins can only touch their own account.
+			protected.PATCH("/users/:id/password", userH.ResetPassword)
+
+			// All other user management endpoints are admin-only.
 			users := protected.Group("/users", middleware.RequireAdmin())
 			{
 				users.GET("", userH.List)
@@ -158,11 +162,7 @@ func Setup(router *gin.Engine, db *mongo.Database, logger *zap.Logger, corsOrigi
 				users.PUT("/:id", userH.Update)
 				users.DELETE("/:id", userH.Delete)
 				users.PATCH("/:id/role", userH.UpdateRole)
-				users.PATCH("/:id/password", userH.ResetPassword)
 			}
-
-			// Own password change — available to any authenticated user
-			protected.PATCH("/users/:id/password", userH.ResetPassword)
 		}
 	}
 }
