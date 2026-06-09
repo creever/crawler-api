@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -58,9 +59,14 @@ func (p *Processor) HandleBlogGenerate(ctx context.Context, t *asynq.Task) error
 
 	// Build an AI caller for steps 2-4 based on the configured writing provider.
 	callAI := p.aiCaller(cfg)
+	geminiWriting := cfg.WritingProvider == models.BlogAIProviderGemini
 	p.logger.Info("blog:generate writing provider",
 		zap.String("provider", string(cfg.WritingProvider)),
 	)
+
+	// Throttle between steps to stay under the Gemini free-tier 15 RPM limit.
+	// Step 1 is always Gemini; steps 2-4 are Gemini only when geminiWriting=true.
+	geminiThrottle(ctx)
 
 	// ── Step 2: Keyword Clustering ───────────────────────────────────────────
 	p.logger.Info("blog:generate step 2 — keyword clustering")
@@ -72,12 +78,20 @@ func (p *Processor) HandleBlogGenerate(ctx context.Context, t *asynq.Task) error
 		}
 	}
 
+	if geminiWriting {
+		geminiThrottle(ctx)
+	}
+
 	// ── Step 3: Content Strategy ─────────────────────────────────────────────
 	p.logger.Info("blog:generate step 3 — content strategy")
 	strategy, err := p.buildStrategy(ctx, callAI, payload.SeedKeyword, payload.Language, serpSummary, keywords)
 	if err != nil {
 		p.setBlogPostStatus(ctx, postOID, models.BlogPostStatusFailed, "strategy step failed: "+err.Error())
 		return fmt.Errorf("blog:generate strategy: %w", err)
+	}
+
+	if geminiWriting {
+		geminiThrottle(ctx)
 	}
 
 	// ── Step 4: Write Blog Post ───────────────────────────────────────────────
@@ -208,21 +222,22 @@ Language/market context: %s. Please search and give me a detailed SERP analysis.
 		"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=%s",
 		apiKey,
 	)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	resp, err := p.geminiDoWithRetry(ctx, func() (*http.Request, error) {
+		r, e := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+		if e != nil {
+			return nil, fmt.Errorf("build gemini SERP request: %w", e)
+		}
+		r.Header.Set("Content-Type", "application/json")
+		return r, nil
+	}, 4)
 	if err != nil {
-		return "", fmt.Errorf("build gemini request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := p.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("gemini request: %w", err)
+		return "", fmt.Errorf("gemini SERP request: %w", err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("gemini returned HTTP %s: %s", resp.Status, string(b))
+		return "", fmt.Errorf("gemini SERP returned HTTP %s: %s", resp.Status, string(b))
 	}
 
 	var gemResp geminiResponse
@@ -488,13 +503,14 @@ func (p *Processor) callGeminiTextAPI(ctx context.Context, apiKey, systemPrompt,
 		"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=%s",
 		apiKey,
 	)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("build gemini text request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := p.httpClient.Do(req)
+	resp, err := p.geminiDoWithRetry(ctx, func() (*http.Request, error) {
+		r, e := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+		if e != nil {
+			return nil, fmt.Errorf("build gemini text request: %w", e)
+		}
+		r.Header.Set("Content-Type", "application/json")
+		return r, nil
+	}, 4)
 	if err != nil {
 		return "", fmt.Errorf("gemini text request: %w", err)
 	}
@@ -587,4 +603,62 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return string(runes[:n])
+}
+
+// geminiDoWithRetry executes the HTTP request built by buildReq and retries up
+// to maxRetries times when the Gemini API responds with 429.  It honours the
+// Retry-After header when present; otherwise it uses a fixed exponential
+// backoff schedule (10 s → 20 s → 40 s → 60 s).
+func (p *Processor) geminiDoWithRetry(ctx context.Context, buildReq func() (*http.Request, error), maxRetries int) (*http.Response, error) {
+	backoff := []time.Duration{10 * time.Second, 20 * time.Second, 40 * time.Second, 60 * time.Second}
+
+	for attempt := 0; ; attempt++ {
+		req, err := buildReq()
+		if err != nil {
+			return nil, err
+		}
+
+		resp, err := p.httpClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+
+		if resp.StatusCode != http.StatusTooManyRequests || attempt >= maxRetries {
+			return resp, nil
+		}
+
+		// Determine wait: honour Retry-After if present, otherwise use backoff.
+		idx := attempt
+		if idx >= len(backoff) {
+			idx = len(backoff) - 1
+		}
+		wait := backoff[idx]
+		if ra := resp.Header.Get("Retry-After"); ra != "" {
+			if secs, parseErr := strconv.Atoi(ra); parseErr == nil && secs > 0 {
+				wait = time.Duration(secs+2) * time.Second // +2 s cushion
+			}
+		}
+		_ = resp.Body.Close()
+
+		p.logger.Warn("Gemini API rate limited (429), retrying",
+			zap.Int("attempt", attempt+1),
+			zap.Int("max_retries", maxRetries),
+			zap.Duration("wait", wait),
+		)
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+}
+
+// geminiThrottle pauses for 5 seconds between consecutive Gemini API calls to
+// stay well under the free-tier limit of 15 RPM.
+func geminiThrottle(ctx context.Context) {
+	select {
+	case <-ctx.Done():
+	case <-time.After(5 * time.Second):
+	}
 }
