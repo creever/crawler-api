@@ -9,6 +9,7 @@ import (
 // Project represents a website project being crawled
 type Project struct {
 	ID          bson.ObjectID `bson:"_id,omitempty"      json:"id,omitempty"`
+	OwnerID     bson.ObjectID `bson:"owner_id"           json:"owner_id"`
 	Name        string        `bson:"name"               json:"name"               binding:"required"`
 	URL         string        `bson:"url"                json:"url"                binding:"required"`
 	Description string        `bson:"description"        json:"description"`

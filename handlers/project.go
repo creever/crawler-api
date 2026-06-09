@@ -10,6 +10,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
+	"github.com/creever/crawler-api/middleware"
 	"github.com/creever/crawler-api/models"
 )
 
@@ -27,8 +28,39 @@ func (h *ProjectHandler) col() *mongo.Collection {
 	return h.db.Collection("projects")
 }
 
+// ownerFilter returns a MongoDB filter that restricts results to the caller's
+// projects. Admins receive an empty filter (see all projects).
+func ownerFilter(c *gin.Context) bson.M {
+	if middleware.IsAdmin(c) {
+		return bson.M{}
+	}
+	return bson.M{"owner_id": middleware.GetUserID(c)}
+}
+
+// checkOwnership returns false (and writes a 403/404) when the caller is not
+// an admin and does not own the project.
+func (h *ProjectHandler) checkOwnership(c *gin.Context, ctx context.Context, id bson.ObjectID) bool {
+	if middleware.IsAdmin(c) {
+		return true
+	}
+	var p models.Project
+	if err := h.col().FindOne(ctx, bson.M{"_id": id}).Decode(&p); err != nil {
+		if err == mongo.ErrNoDocuments {
+			c.JSON(http.StatusNotFound, gin.H{"error": "project not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch project"})
+		}
+		return false
+	}
+	if p.OwnerID != middleware.GetUserID(c) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
+		return false
+	}
+	return true
+}
+
 // List godoc
-// @Summary      List all projects
+// @Summary      List projects (own projects for users; all for admins)
 // @Tags         projects
 // @Produce      json
 // @Success      200  {array}   models.Project
@@ -38,12 +70,12 @@ func (h *ProjectHandler) List(c *gin.Context) {
 	defer cancel()
 
 	opts := options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}})
-	cursor, err := h.col().Find(ctx, bson.M{}, opts)
+	cursor, err := h.col().Find(ctx, ownerFilter(c), opts)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch projects"})
 		return
 	}
-	defer cursor.Close(ctx)
+	defer cursor.Close(ctx) //nolint:errcheck
 
 	var projects []models.Project
 	if err = cursor.All(ctx, &projects); err != nil {
@@ -74,8 +106,13 @@ func (h *ProjectHandler) Get(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	filter := bson.M{"_id": id}
+	if !middleware.IsAdmin(c) {
+		filter["owner_id"] = middleware.GetUserID(c)
+	}
+
 	var project models.Project
-	if err = h.col().FindOne(ctx, bson.M{"_id": id}).Decode(&project); err != nil {
+	if err = h.col().FindOne(ctx, filter).Decode(&project); err != nil {
 		if err == mongo.ErrNoDocuments {
 			c.JSON(http.StatusNotFound, gin.H{"error": "project not found"})
 			return
@@ -103,6 +140,7 @@ func (h *ProjectHandler) Create(c *gin.Context) {
 
 	now := time.Now().UTC()
 	project.ID = bson.NewObjectID()
+	project.OwnerID = middleware.GetUserID(c)
 	project.Active = true
 	project.CreatedAt = now
 	project.UpdatedAt = now
@@ -141,6 +179,10 @@ func (h *ProjectHandler) Update(c *gin.Context) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+
+	if !h.checkOwnership(c, ctx, id) {
+		return
+	}
 
 	input.UpdatedAt = time.Now().UTC()
 	result := h.col().FindOneAndUpdate(
@@ -183,6 +225,10 @@ func (h *ProjectHandler) Delete(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	if !h.checkOwnership(c, ctx, id) {
+		return
+	}
+
 	result, err := h.col().DeleteOne(ctx, bson.M{"_id": id})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete project"})
@@ -214,8 +260,13 @@ func (h *ProjectHandler) GetConfig(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	filter := bson.M{"_id": id}
+	if !middleware.IsAdmin(c) {
+		filter["owner_id"] = middleware.GetUserID(c)
+	}
+
 	var project models.Project
-	if err = h.col().FindOne(ctx, bson.M{"_id": id}).Decode(&project); err != nil {
+	if err = h.col().FindOne(ctx, filter).Decode(&project); err != nil {
 		if err == mongo.ErrNoDocuments {
 			c.JSON(http.StatusNotFound, gin.H{"error": "project not found"})
 			return

@@ -19,6 +19,7 @@ import (
 	"github.com/creever/crawler-api/worker"
 )
 
+
 func main() {
 	cfg := config.Load()
 
@@ -39,6 +40,9 @@ func main() {
 	mongoClient := db.Connect(cfg.MongoURI)
 	defer db.Disconnect(mongoClient)
 	database := mongoClient.Database(cfg.MongoDB)
+
+	// Ensure indexes exist (idempotent)
+	db.EnsureIndexes(database, logger)
 
 	// Asynq client (used by the HTTP handler to enqueue tasks)
 	redisOpt := asynq.RedisClientOpt{Addr: cfg.RedisAddr}
@@ -64,7 +68,7 @@ func main() {
 	router := gin.New()
 	router.Use(gin.Recovery())
 
-	routes.Setup(router, database, logger, cfg.CORSOrigins, asynqClient)
+	routes.Setup(router, database, logger, cfg.CORSOrigins, asynqClient, cfg)
 
 	srv := &http.Server{
 		Addr:        ":" + cfg.ServerPort,
