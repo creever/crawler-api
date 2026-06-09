@@ -14,6 +14,7 @@ const (
 	TypeCrawlSEO      = "crawl:seo"
 	TypeCrawlRender   = "crawl:render"
 	TypeCrawlDiscover = "crawl:discover"
+	TypeBlogGenerate  = "blog:generate"
 )
 
 // CrawlPayload is the JSON payload stored in every crawl task.
@@ -66,4 +67,24 @@ func NewCrawlDiscoverTask(discoveryID string, config models.ProjectConfig) (*asy
 		return nil, fmt.Errorf("marshal crawl:discover payload: %w", err)
 	}
 	return asynq.NewTask(TypeCrawlDiscover, payload), nil
+}
+
+// BlogGeneratePayload is the JSON payload for a blog:generate task.
+type BlogGeneratePayload struct {
+	BlogPostID   string `json:"blog_post_id"`
+	BlogConfigID string `json:"blog_config_id"`
+	ProjectID    string `json:"project_id"`
+	SeedKeyword  string `json:"seed_keyword"`
+	Language     string `json:"language"`
+	Tone         string `json:"tone"`
+	WordCount    int    `json:"word_count"`
+}
+
+// NewBlogGenerateTask creates an asynq task for AI-driven blog post generation.
+func NewBlogGenerateTask(p BlogGeneratePayload) (*asynq.Task, error) {
+	payload, err := json.Marshal(p)
+	if err != nil {
+		return nil, fmt.Errorf("marshal blog:generate payload: %w", err)
+	}
+	return asynq.NewTask(TypeBlogGenerate, payload), nil
 }

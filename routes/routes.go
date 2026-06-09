@@ -33,6 +33,8 @@ func Setup(router *gin.Engine, db *mongo.Database, logger *zap.Logger, corsOrigi
 	queueH := handlers.NewQueueHandler(db, asynqClient)
 	serveH := handlers.NewServeHandler(db, asynqClient)
 	discoveryH := handlers.NewDiscoveryHandler(db, asynqClient)
+	blogConfigH := handlers.NewBlogConfigHandler(db)
+	blogPostH := handlers.NewBlogPostHandler(db, asynqClient)
 
 	// Prerender server — synchronous endpoint for nginx proxy.
 	// Usage: GET /prerender?url=https://example.com/page
@@ -108,6 +110,26 @@ func Setup(router *gin.Engine, db *mongo.Database, logger *zap.Logger, corsOrigi
 			discover.POST("", discoveryH.Start)
 			discover.GET("/:id", discoveryH.Get)
 			discover.DELETE("/:id", discoveryH.Delete)
+		}
+
+		// Blog generation
+		blog := api.Group("/blog")
+		{
+			configs := blog.Group("/configs")
+			{
+				configs.POST("", blogConfigH.Create)
+				configs.GET("", blogConfigH.List)
+				configs.GET("/:id", blogConfigH.Get)
+				configs.PUT("/:id", blogConfigH.Update)
+				configs.DELETE("/:id", blogConfigH.Delete)
+			}
+			blog.POST("/generate", blogPostH.Trigger)
+			posts := blog.Group("/posts")
+			{
+				posts.GET("", blogPostH.List)
+				posts.GET("/:id", blogPostH.Get)
+				posts.DELETE("/:id", blogPostH.Delete)
+			}
 		}
 	}
 }

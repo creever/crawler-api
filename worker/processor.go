@@ -46,6 +46,7 @@ func (p *Processor) Register(mux *asynq.ServeMux) {
 	mux.HandleFunc(TypeCrawlSEO, p.HandleCrawlSEO)
 	mux.HandleFunc(TypeCrawlRender, p.HandleCrawlRender)
 	mux.HandleFunc(TypeCrawlDiscover, p.HandleCrawlDiscover)
+	mux.HandleFunc(TypeBlogGenerate, p.HandleBlogGenerate)
 }
 
 // NewServer creates a pre-configured asynq.Server backed by Redis at redisAddr.

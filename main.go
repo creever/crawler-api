@@ -57,6 +57,8 @@ func main() {
 		}
 	}()
 
+	worker.StartBlogScheduler(database, asynqClient, logger)
+
 	// GIN
 	gin.SetMode(cfg.GinMode)
 	router := gin.New()
