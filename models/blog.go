@@ -17,6 +17,16 @@ const (
 	BlogPostStatusPublished  BlogPostStatus = "published"
 )
 
+// BlogAIProvider selects the LLM used for writing steps (keyword clustering,
+// strategy, and article writing). Step 1 (SERP via Gemini Search Grounding)
+// is always Gemini regardless of this setting.
+type BlogAIProvider string
+
+const (
+	BlogAIProviderClaude BlogAIProvider = "claude" // default
+	BlogAIProviderGemini BlogAIProvider = "gemini"
+)
+
 // BlogConfig stores per-project settings for the blog generation pipeline.
 // MongoDB collection: blog_configs
 type BlogConfig struct {
@@ -25,10 +35,13 @@ type BlogConfig struct {
 	Active          bool          `bson:"active"        json:"active"`
 	GeminiAPIKey    string        `bson:"gemini_api_key"    json:"gemini_api_key"`
 	AnthropicAPIKey string        `bson:"anthropic_api_key" json:"anthropic_api_key"`
+	// WritingProvider controls which LLM is used for steps 2-4.
+	// "claude" (default) uses the Anthropic API; "gemini" uses the Gemini text API.
+	WritingProvider BlogAIProvider `bson:"writing_provider" json:"writing_provider"`
 	// PublishEndpoint is the custom CMS API URL that receives the draft post.
-	PublishEndpoint string   `bson:"publish_endpoint" json:"publish_endpoint"`
-	PublishAPIKey   string   `bson:"publish_api_key"  json:"publish_api_key"`
-	PublishHeader   string   `bson:"publish_header"   json:"publish_header"` // e.g. "Authorization"
+	PublishEndpoint  string   `bson:"publish_endpoint"   json:"publish_endpoint"`
+	PublishAPIKey    string   `bson:"publish_api_key"    json:"publish_api_key"`
+	PublishHeader    string   `bson:"publish_header"     json:"publish_header"` // e.g. "Authorization"
 	DefaultLanguage  string   `bson:"default_language"   json:"default_language"`
 	DefaultTone      string   `bson:"default_tone"       json:"default_tone"`
 	DefaultWordCount int      `bson:"default_word_count" json:"default_word_count"`

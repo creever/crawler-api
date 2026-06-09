@@ -56,9 +56,15 @@ func (p *Processor) HandleBlogGenerate(ctx context.Context, t *asynq.Task) error
 		serpSummary = fmt.Sprintf("Topic: %s. Language: %s.", payload.SeedKeyword, payload.Language)
 	}
 
-	// ── Step 2: Keyword Clustering (Claude) ─────────────────────────────────
+	// Build an AI caller for steps 2-4 based on the configured writing provider.
+	callAI := p.aiCaller(cfg)
+	p.logger.Info("blog:generate writing provider",
+		zap.String("provider", string(cfg.WritingProvider)),
+	)
+
+	// ── Step 2: Keyword Clustering ───────────────────────────────────────────
 	p.logger.Info("blog:generate step 2 — keyword clustering")
-	keywords, err := p.clusterKeywords(ctx, cfg.AnthropicAPIKey, payload.SeedKeyword, payload.Language, serpSummary)
+	keywords, err := p.clusterKeywords(ctx, callAI, payload.SeedKeyword, payload.Language, serpSummary)
 	if err != nil {
 		p.logger.Warn("blog:generate keyword clustering failed, using fallback", zap.Error(err))
 		keywords = []models.BlogKeyword{
@@ -66,17 +72,17 @@ func (p *Processor) HandleBlogGenerate(ctx context.Context, t *asynq.Task) error
 		}
 	}
 
-	// ── Step 3: Content Strategy (Claude) ───────────────────────────────────
+	// ── Step 3: Content Strategy ─────────────────────────────────────────────
 	p.logger.Info("blog:generate step 3 — content strategy")
-	strategy, err := p.buildStrategy(ctx, cfg.AnthropicAPIKey, payload.SeedKeyword, payload.Language, serpSummary, keywords)
+	strategy, err := p.buildStrategy(ctx, callAI, payload.SeedKeyword, payload.Language, serpSummary, keywords)
 	if err != nil {
 		p.setBlogPostStatus(ctx, postOID, models.BlogPostStatusFailed, "strategy step failed: "+err.Error())
 		return fmt.Errorf("blog:generate strategy: %w", err)
 	}
 
-	// ── Step 4: Write Blog Post (Claude) ────────────────────────────────────
+	// ── Step 4: Write Blog Post ───────────────────────────────────────────────
 	p.logger.Info("blog:generate step 4 — writing")
-	content, err := p.writeBlogPost(ctx, cfg.AnthropicAPIKey, payload, strategy, keywords, serpSummary)
+	content, err := p.writeBlogPost(ctx, callAI, payload, strategy, keywords, serpSummary)
 	if err != nil {
 		p.setBlogPostStatus(ctx, postOID, models.BlogPostStatusFailed, "writing step failed: "+err.Error())
 		return fmt.Errorf("blog:generate writing: %w", err)
@@ -238,10 +244,30 @@ Language/market context: %s. Please search and give me a detailed SERP analysis.
 }
 
 // ---------------------------------------------------------------------------
-// Step 2 — Keyword Clustering (Claude)
+// AI caller dispatcher
 // ---------------------------------------------------------------------------
 
-func (p *Processor) clusterKeywords(ctx context.Context, apiKey, keyword, language, serpSummary string) ([]models.BlogKeyword, error) {
+// aiCallFunc is a provider-agnostic function for a single LLM call.
+type aiCallFunc func(ctx context.Context, system, user string, maxTokens int) (string, error)
+
+// aiCaller returns a dispatch function that routes to Claude or Gemini
+// depending on BlogConfig.WritingProvider.
+func (p *Processor) aiCaller(cfg models.BlogConfig) aiCallFunc {
+	if cfg.WritingProvider == models.BlogAIProviderGemini {
+		return func(ctx context.Context, system, user string, maxTokens int) (string, error) {
+			return p.callGeminiTextAPI(ctx, cfg.GeminiAPIKey, system, user)
+		}
+	}
+	return func(ctx context.Context, system, user string, maxTokens int) (string, error) {
+		return p.callClaudeAPI(ctx, cfg.AnthropicAPIKey, system, user, maxTokens)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Step 2 — Keyword Clustering
+// ---------------------------------------------------------------------------
+
+func (p *Processor) clusterKeywords(ctx context.Context, call aiCallFunc, keyword, language, serpSummary string) ([]models.BlogKeyword, error) {
 	system := `You are an expert SEO strategist. Based on the seed keyword and SERP research data, return ONLY a valid JSON array (no markdown, no backticks) of 8-10 keyword opportunities.
 
 Each object must have exactly:
@@ -255,7 +281,7 @@ Prioritize keywords that naturally emerge from the SERP data. Mix intents. Retur
 	userMsg := fmt.Sprintf("Seed keyword: %q\nLanguage: %s\n\nSERP research data:\n%s",
 		keyword, language, truncate(serpSummary, 2000))
 
-	raw, err := p.callClaudeAPI(ctx, apiKey, system, userMsg, 1200)
+	raw, err := call(ctx, system, userMsg, 1200)
 	if err != nil {
 		return nil, err
 	}
@@ -269,10 +295,10 @@ Prioritize keywords that naturally emerge from the SERP data. Mix intents. Retur
 }
 
 // ---------------------------------------------------------------------------
-// Step 3 — Content Strategy (Claude)
+// Step 3 — Content Strategy
 // ---------------------------------------------------------------------------
 
-func (p *Processor) buildStrategy(ctx context.Context, apiKey, keyword, language, serpSummary string, keywords []models.BlogKeyword) (models.BlogStrategy, error) {
+func (p *Processor) buildStrategy(ctx context.Context, call aiCallFunc, keyword, language, serpSummary string, keywords []models.BlogKeyword) (models.BlogStrategy, error) {
 	system := `You are an SEO content strategist. Using SERP data and keyword clusters, return ONLY valid JSON (no markdown) with this exact structure:
 {
   "primary_intent": "string (1 sentence)",
@@ -291,7 +317,7 @@ Base paa_questions on real questions from the SERP data. Return only valid JSON.
 	userMsg := fmt.Sprintf("Keyword: %q\nLanguage: %s\n\nSERP research:\n%s\n\nKeyword clusters:\n%s",
 		keyword, language, truncate(serpSummary, 2000), string(kwJSON))
 
-	raw, err := p.callClaudeAPI(ctx, apiKey, system, userMsg, 1200)
+	raw, err := call(ctx, system, userMsg, 1200)
 	if err != nil {
 		return models.BlogStrategy{}, err
 	}
@@ -305,10 +331,10 @@ Base paa_questions on real questions from the SERP data. Return only valid JSON.
 }
 
 // ---------------------------------------------------------------------------
-// Step 4 — Write Blog Post (Claude)
+// Step 4 — Write Blog Post
 // ---------------------------------------------------------------------------
 
-func (p *Processor) writeBlogPost(ctx context.Context, apiKey string, payload BlogGeneratePayload, strategy models.BlogStrategy, keywords []models.BlogKeyword, serpSummary string) (string, error) {
+func (p *Processor) writeBlogPost(ctx context.Context, call aiCallFunc, payload BlogGeneratePayload, strategy models.BlogStrategy, keywords []models.BlogKeyword, serpSummary string) (string, error) {
 	system := `You are a senior SEO content writer. Write engaging, well-structured blog posts that rank well and provide genuine value to readers. Use proper heading hierarchy, natural keyword integration, and concise paragraphs. Never use placeholder text or filler content.`
 
 	var kwList []string
@@ -349,7 +375,7 @@ Write the complete blog post now, starting directly with the title. No preamble,
 		truncate(serpSummary, 1500),
 	)
 
-	return p.callClaudeAPI(ctx, apiKey, system, userMsg, 4096)
+	return call(ctx, system, userMsg, 4096)
 }
 
 // ---------------------------------------------------------------------------
@@ -428,6 +454,75 @@ func (p *Processor) callClaudeAPI(ctx context.Context, apiKey, systemPrompt, use
 		return "", fmt.Errorf("claude returned no text content")
 	}
 	return strings.Join(texts, "\n"), nil
+}
+
+// ---------------------------------------------------------------------------
+// Gemini text API helper (plain generation, no search grounding)
+// ---------------------------------------------------------------------------
+
+type geminiTextRequest struct {
+	SystemInstruction *geminiContent `json:"system_instruction,omitempty"`
+	Contents          []geminiContent `json:"contents"`
+}
+
+// callGeminiTextAPI calls Gemini 2.0 Flash for plain text generation (steps 2-4).
+// It does NOT attach the Google Search tool — that is only used in fetchGeminiSERP.
+func (p *Processor) callGeminiTextAPI(ctx context.Context, apiKey, systemPrompt, userMessage string) (string, error) {
+	if apiKey == "" {
+		return "", fmt.Errorf("gemini API key not configured")
+	}
+
+	reqBody := geminiTextRequest{
+		Contents: []geminiContent{{Parts: []geminiPart{{Text: userMessage}}}},
+	}
+	if systemPrompt != "" {
+		reqBody.SystemInstruction = &geminiContent{Parts: []geminiPart{{Text: systemPrompt}}}
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("marshal gemini text request: %w", err)
+	}
+
+	endpoint := fmt.Sprintf(
+		"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=%s",
+		apiKey,
+	)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("build gemini text request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("gemini text request: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("gemini text returned HTTP %s: %s", resp.Status, string(b))
+	}
+
+	var gemResp geminiResponse
+	if err = json.NewDecoder(resp.Body).Decode(&gemResp); err != nil {
+		return "", fmt.Errorf("decode gemini text response: %w", err)
+	}
+	if len(gemResp.Candidates) == 0 {
+		return "", fmt.Errorf("gemini text returned no candidates")
+	}
+
+	var parts []string
+	for _, part := range gemResp.Candidates[0].Content.Parts {
+		if part.Text != "" {
+			parts = append(parts, part.Text)
+		}
+	}
+	if len(parts) == 0 {
+		return "", fmt.Errorf("gemini text returned no text content")
+	}
+	return strings.Join(parts, "\n"), nil
 }
 
 // ---------------------------------------------------------------------------
