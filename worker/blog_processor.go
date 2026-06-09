@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -605,13 +604,11 @@ func truncate(s string, n int) string {
 	return string(runes[:n])
 }
 
-// geminiDoWithRetry executes the HTTP request built by buildReq and retries up
-// to maxRetries times when the Gemini API responds with 429.  It honours the
-// Retry-After header when present; otherwise it uses a fixed exponential
-// backoff schedule (10 s → 20 s → 40 s → 60 s).
+// geminiDoWithRetry executes the HTTP request built by buildReq and retries on
+// HTTP 429 responses, using the retryDelay from Gemini's JSON RetryInfo detail.
+// A retryDelay of "0s" means daily quota exhausted — the error is returned
+// immediately without retrying.  Retries are capped at maxRetries.
 func (p *Processor) geminiDoWithRetry(ctx context.Context, buildReq func() (*http.Request, error), maxRetries int) (*http.Response, error) {
-	backoff := []time.Duration{10 * time.Second, 20 * time.Second, 40 * time.Second, 60 * time.Second}
-
 	for attempt := 0; ; attempt++ {
 		req, err := buildReq()
 		if err != nil {
@@ -627,18 +624,21 @@ func (p *Processor) geminiDoWithRetry(ctx context.Context, buildReq func() (*htt
 			return resp, nil
 		}
 
-		// Determine wait: honour Retry-After if present, otherwise use backoff.
-		idx := attempt
-		if idx >= len(backoff) {
-			idx = len(backoff) - 1
-		}
-		wait := backoff[idx]
-		if ra := resp.Header.Get("Retry-After"); ra != "" {
-			if secs, parseErr := strconv.Atoi(ra); parseErr == nil && secs > 0 {
-				wait = time.Duration(secs+2) * time.Second // +2 s cushion
-			}
-		}
+		// Gemini embeds retry information in the JSON body, not in headers.
+		body, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
+
+		wait := parseGeminiRetryDelay(body)
+		if wait == 0 {
+			// retryDelay "0s" = daily/project quota exhausted; retrying won't help.
+			return nil, fmt.Errorf("gemini quota exhausted (daily limit): %s", geminiErrMessage(body))
+		}
+
+		// Add a 3 s cushion and cap at 2 minutes.
+		wait += 3 * time.Second
+		if wait > 2*time.Minute {
+			wait = 2 * time.Minute
+		}
 
 		p.logger.Warn("Gemini API rate limited (429), retrying",
 			zap.Int("attempt", attempt+1),
@@ -652,6 +652,51 @@ func (p *Processor) geminiDoWithRetry(ctx context.Context, buildReq func() (*htt
 		case <-time.After(wait):
 		}
 	}
+}
+
+// geminiErrorBody is used only to parse 429 error responses from the Gemini API.
+type geminiErrorBody struct {
+	Error struct {
+		Message string `json:"message"`
+		Details []struct {
+			Type       string `json:"@type"`
+			RetryDelay string `json:"retryDelay,omitempty"`
+		} `json:"details"`
+	} `json:"error"`
+}
+
+// parseGeminiRetryDelay extracts the retry duration from a Gemini 429 body.
+// Returns 0 when retryDelay is "0s" (quota exhausted) or unparseable.
+func parseGeminiRetryDelay(body []byte) time.Duration {
+	var e geminiErrorBody
+	if json.Unmarshal(body, &e) != nil {
+		return 0
+	}
+	for _, d := range e.Error.Details {
+		if strings.Contains(d.Type, "RetryInfo") {
+			dur, err := time.ParseDuration(d.RetryDelay)
+			if err == nil && dur > 0 {
+				return dur
+			}
+			return 0
+		}
+	}
+	return 0
+}
+
+// geminiErrMessage returns the human-readable message from a Gemini error body.
+func geminiErrMessage(body []byte) string {
+	var e geminiErrorBody
+	if json.Unmarshal(body, &e) != nil || e.Error.Message == "" {
+		if len(body) > 300 {
+			return string(body[:300])
+		}
+		return string(body)
+	}
+	if len(e.Error.Message) > 300 {
+		return e.Error.Message[:300]
+	}
+	return e.Error.Message
 }
 
 // geminiThrottle pauses for 5 seconds between consecutive Gemini API calls to
