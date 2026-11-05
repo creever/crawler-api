@@ -62,6 +62,7 @@ func main() {
 	}()
 
 	worker.StartBlogScheduler(database, asynqClient, logger)
+	worker.StartGSCScheduler(database, asynqClient, logger)
 
 	// GIN
 	gin.SetMode(cfg.GinMode)
