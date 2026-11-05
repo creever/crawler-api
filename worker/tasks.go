@@ -16,6 +16,7 @@ const (
 	TypeCrawlDiscover = "crawl:discover"
 	TypeBlogGenerate  = "blog:generate"
 	TypeGSCSync       = "gsc:sync"
+	TypeComputeOpps   = "opportunities:compute"
 )
 
 // CrawlPayload is the JSON payload stored in every crawl task.
@@ -107,4 +108,19 @@ func NewGSCSyncTask(p GSCSyncPayload) (*asynq.Task, error) {
 		return nil, fmt.Errorf("marshal gsc:sync payload: %w", err)
 	}
 	return asynq.NewTask(TypeGSCSync, payload), nil
+}
+
+// ComputeOppsPayload is the JSON payload for an opportunities:compute task.
+type ComputeOppsPayload struct {
+	ProjectID string `json:"project_id"`
+}
+
+// NewComputeOppsTask creates an asynq task for recomputing a project's
+// organic-search opportunities from stored GSC rows.
+func NewComputeOppsTask(projectID string) (*asynq.Task, error) {
+	payload, err := json.Marshal(ComputeOppsPayload{ProjectID: projectID})
+	if err != nil {
+		return nil, fmt.Errorf("marshal opportunities:compute payload: %w", err)
+	}
+	return asynq.NewTask(TypeComputeOpps, payload), nil
 }

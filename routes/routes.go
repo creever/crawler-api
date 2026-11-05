@@ -41,6 +41,7 @@ func Setup(router *gin.Engine, db *mongo.Database, logger *zap.Logger, corsOrigi
 	blogConfigH := handlers.NewBlogConfigHandler(db)
 	blogPostH := handlers.NewBlogPostHandler(db, asynqClient)
 	gscH := handlers.NewGSCHandler(db, asynqClient)
+	oppH := handlers.NewOpportunityHandler(db, asynqClient)
 	authH := handlers.NewAuthHandler(db, jwtSecret, cfg.JWTExpirySec, cfg.JWTRefreshExpSec)
 	userH := handlers.NewUserHandler(db)
 
@@ -75,6 +76,8 @@ func Setup(router *gin.Engine, db *mongo.Database, logger *zap.Logger, corsOrigi
 				projects.GET("/:id/config", projectH.GetConfig)
 				projects.POST("/:id/gsc/sync", gscH.TriggerSync)
 				projects.GET("/:id/gsc/status", gscH.Status)
+				projects.GET("/:id/opportunities", oppH.List)
+				projects.POST("/:id/opportunities/compute", oppH.Trigger)
 			}
 
 			// SEO Analytics
