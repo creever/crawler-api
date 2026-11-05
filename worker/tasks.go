@@ -17,6 +17,7 @@ const (
 	TypeBlogGenerate  = "blog:generate"
 	TypeGSCSync       = "gsc:sync"
 	TypeComputeOpps   = "opportunities:compute"
+	TypeGenSuggest    = "suggestions:generate"
 )
 
 // CrawlPayload is the JSON payload stored in every crawl task.
@@ -123,4 +124,20 @@ func NewComputeOppsTask(projectID string) (*asynq.Task, error) {
 		return nil, fmt.Errorf("marshal opportunities:compute payload: %w", err)
 	}
 	return asynq.NewTask(TypeComputeOpps, payload), nil
+}
+
+// GenSuggestPayload is the JSON payload for a suggestions:generate task.
+type GenSuggestPayload struct {
+	ProjectID string `json:"project_id"`
+	Limit     int    `json:"limit,omitempty"` // max opportunities to process (default 10)
+}
+
+// NewGenSuggestTask creates an asynq task for generating AI fix suggestions
+// for a project's top opportunities.
+func NewGenSuggestTask(p GenSuggestPayload) (*asynq.Task, error) {
+	payload, err := json.Marshal(p)
+	if err != nil {
+		return nil, fmt.Errorf("marshal suggestions:generate payload: %w", err)
+	}
+	return asynq.NewTask(TypeGenSuggest, payload), nil
 }

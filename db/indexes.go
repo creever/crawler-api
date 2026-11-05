@@ -103,4 +103,14 @@ func EnsureIndexes(database *mongo.Database, logger *zap.Logger) {
 		},
 		Options: options.Index().SetName("opportunities_project_type"),
 	})
+
+	// suggestions: per-project listing by status
+	create("suggestions", mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "project_id", Value: 1},
+			{Key: "status", Value: 1},
+			{Key: "created_at", Value: -1},
+		},
+		Options: options.Index().SetName("suggestions_project_status"),
+	})
 }
