@@ -46,33 +46,48 @@ func (p *Processor) HandleSuggestionsGenerate(ctx context.Context, t *asynq.Task
 		return fmt.Errorf("%w: %v", asynq.SkipRetry, err)
 	}
 
-	// Top actionable opportunities, deduplicated by page.
-	cursor, err := p.db.Collection("opportunities").Find(ctx, bson.M{
-		"project_id": projectOID,
-		"type": bson.M{"$in": []models.OpportunityType{
-			models.OppStrikingDistance, models.OppLowCTR, models.OppCannibalization,
-		}},
-	}, options.Find().SetSort(bson.D{{Key: "rank", Value: 1}}).SetLimit(int64(limit*3)))
-	if err != nil {
-		return fmt.Errorf("query opportunities: %w", err)
-	}
-	var opps []models.Opportunity
-	if err = cursor.All(ctx, &opps); err != nil {
-		cursor.Close(ctx) //nolint:errcheck
-		return fmt.Errorf("decode opportunities: %w", err)
-	}
-	cursor.Close(ctx) //nolint:errcheck
-
-	seenPages := make(map[string]bool)
+	// Targets: either the single requested opportunity, or the top actionable
+	// opportunities deduplicated by page.
 	var targets []models.Opportunity
-	for _, o := range opps {
-		if o.Page == "" || seenPages[o.Page] {
-			continue
+	if payload.OpportunityID != "" {
+		oppOID, oidErr := bson.ObjectIDFromHex(payload.OpportunityID)
+		if oidErr != nil {
+			return fmt.Errorf("%w: invalid opportunity_id: %v", asynq.SkipRetry, oidErr)
 		}
-		seenPages[o.Page] = true
-		targets = append(targets, o)
-		if len(targets) >= limit {
-			break
+		var opp models.Opportunity
+		if err = p.db.Collection("opportunities").FindOne(ctx, bson.M{
+			"_id": oppOID, "project_id": projectOID,
+		}).Decode(&opp); err != nil {
+			return fmt.Errorf("%w: opportunity not found: %v", asynq.SkipRetry, err)
+		}
+		targets = append(targets, opp)
+	} else {
+		cursor, err := p.db.Collection("opportunities").Find(ctx, bson.M{
+			"project_id": projectOID,
+			"type": bson.M{"$in": []models.OpportunityType{
+				models.OppStrikingDistance, models.OppLowCTR, models.OppCannibalization,
+			}},
+		}, options.Find().SetSort(bson.D{{Key: "rank", Value: 1}}).SetLimit(int64(limit*3)))
+		if err != nil {
+			return fmt.Errorf("query opportunities: %w", err)
+		}
+		var opps []models.Opportunity
+		if err = cursor.All(ctx, &opps); err != nil {
+			cursor.Close(ctx) //nolint:errcheck
+			return fmt.Errorf("decode opportunities: %w", err)
+		}
+		cursor.Close(ctx) //nolint:errcheck
+
+		seenPages := make(map[string]bool)
+		for _, o := range opps {
+			if o.Page == "" || seenPages[o.Page] {
+				continue
+			}
+			seenPages[o.Page] = true
+			targets = append(targets, o)
+			if len(targets) >= limit {
+				break
+			}
 		}
 	}
 	if len(targets) == 0 {

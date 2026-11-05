@@ -79,6 +79,7 @@ func Setup(router *gin.Engine, db *mongo.Database, logger *zap.Logger, corsOrigi
 				projects.GET("/:id/gsc/status", gscH.Status)
 				projects.GET("/:id/opportunities", oppH.List)
 				projects.POST("/:id/opportunities/compute", oppH.Trigger)
+				projects.POST("/:id/opportunities/:oid/suggest", oppH.SuggestForOpportunity)
 				projects.GET("/:id/suggestions", sugH.List)
 				projects.POST("/:id/suggestions/generate", sugH.Generate)
 				projects.PATCH("/:id/suggestions/:sid/review", sugH.Review)

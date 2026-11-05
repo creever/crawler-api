@@ -123,3 +123,51 @@ func (h *OpportunityHandler) Trigger(c *gin.Context) {
 	}
 	c.JSON(http.StatusAccepted, gin.H{"status": "enqueued", "task_id": info.ID, "project_id": id.Hex()})
 }
+
+// SuggestForOpportunity godoc
+// @Summary      Enqueue AI suggestion generation for a single opportunity
+// @Tags         projects
+// @Produce      json
+// @Param        id   path  string  true  "Project ID"
+// @Param        oid  path  string  true  "Opportunity ID"
+// @Success      202  {object}  map[string]string
+// @Router       /api/v1/projects/{id}/opportunities/{oid}/suggest [post]
+func (h *OpportunityHandler) SuggestForOpportunity(c *gin.Context) {
+	id, err := bson.ObjectIDFromHex(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid project id"})
+		return
+	}
+	oid, err := bson.ObjectIDFromHex(c.Param("oid"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid opportunity id"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err = h.db.Collection("projects").FindOne(ctx, gscProjectFilter(c, id)).Decode(&struct{}{}); err != nil {
+		if err == mongo.ErrNoDocuments {
+			c.JSON(http.StatusNotFound, gin.H{"error": "project not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch project"})
+		}
+		return
+	}
+
+	task, err := worker.NewGenSuggestTask(worker.GenSuggestPayload{
+		ProjectID:     id.Hex(),
+		OpportunityID: oid.Hex(),
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to build task"})
+		return
+	}
+	info, err := h.asynqClient.EnqueueContext(ctx, task)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to enqueue task"})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"status": "enqueued", "task_id": info.ID, "opportunity_id": oid.Hex()})
+}
