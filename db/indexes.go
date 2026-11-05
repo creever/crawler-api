@@ -85,4 +85,22 @@ func EnsureIndexes(database *mongo.Database, logger *zap.Logger) {
 		Keys:    bson.D{{Key: "project_id", Value: 1}},
 		Options: options.Index().SetUnique(true).SetName("gsc_sync_state_project_unique"),
 	})
+
+	// opportunities: per-project listing by rank
+	create("opportunities", mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "project_id", Value: 1},
+			{Key: "rank", Value: 1},
+		},
+		Options: options.Index().SetName("opportunities_project_rank"),
+	})
+
+	// opportunities: filter by signal type
+	create("opportunities", mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "project_id", Value: 1},
+			{Key: "type", Value: 1},
+		},
+		Options: options.Index().SetName("opportunities_project_type"),
+	})
 }
