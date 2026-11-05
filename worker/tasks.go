@@ -15,6 +15,7 @@ const (
 	TypeCrawlRender   = "crawl:render"
 	TypeCrawlDiscover = "crawl:discover"
 	TypeBlogGenerate  = "blog:generate"
+	TypeGSCSync       = "gsc:sync"
 )
 
 // CrawlPayload is the JSON payload stored in every crawl task.
@@ -87,4 +88,23 @@ func NewBlogGenerateTask(p BlogGeneratePayload) (*asynq.Task, error) {
 		return nil, fmt.Errorf("marshal blog:generate payload: %w", err)
 	}
 	return asynq.NewTask(TypeBlogGenerate, payload), nil
+}
+
+// GSCSyncPayload is the JSON payload for a gsc:sync task.
+// Empty StartDate/EndDate means the worker derives the range from the
+// project's sync state (daily: last synced date + 1 … today-3d).
+type GSCSyncPayload struct {
+	ProjectID string `json:"project_id"`
+	StartDate string `json:"start_date,omitempty"` // YYYY-MM-DD
+	EndDate   string `json:"end_date,omitempty"`   // YYYY-MM-DD
+	Backfill  bool   `json:"backfill,omitempty"`   // fetch up to 16 months of history
+}
+
+// NewGSCSyncTask creates an asynq task for syncing GSC Search Analytics rows.
+func NewGSCSyncTask(p GSCSyncPayload) (*asynq.Task, error) {
+	payload, err := json.Marshal(p)
+	if err != nil {
+		return nil, fmt.Errorf("marshal gsc:sync payload: %w", err)
+	}
+	return asynq.NewTask(TypeGSCSync, payload), nil
 }

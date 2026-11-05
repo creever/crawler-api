@@ -48,4 +48,41 @@ func EnsureIndexes(database *mongo.Database, logger *zap.Logger) {
 		Keys:    bson.D{{Key: "owner_id", Value: 1}},
 		Options: options.Index().SetName("projects_owner_id"),
 	})
+
+	// gsc_rows: unique row per project × query × page × date × device (upsert key)
+	create("gsc_rows", mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "project_id", Value: 1},
+			{Key: "query", Value: 1},
+			{Key: "page", Value: 1},
+			{Key: "date", Value: 1},
+			{Key: "device", Value: 1},
+		},
+		Options: options.Index().SetUnique(true).SetName("gsc_rows_unique"),
+	})
+
+	// gsc_rows: time-range aggregations per project
+	create("gsc_rows", mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "project_id", Value: 1},
+			{Key: "date", Value: 1},
+		},
+		Options: options.Index().SetName("gsc_rows_project_date"),
+	})
+
+	// gsc_rows: per-page lookups (opportunity engine, impact tracking)
+	create("gsc_rows", mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "project_id", Value: 1},
+			{Key: "page", Value: 1},
+			{Key: "date", Value: 1},
+		},
+		Options: options.Index().SetName("gsc_rows_project_page_date"),
+	})
+
+	// gsc_sync_state: one state document per project
+	create("gsc_sync_state", mongo.IndexModel{
+		Keys:    bson.D{{Key: "project_id", Value: 1}},
+		Options: options.Index().SetUnique(true).SetName("gsc_sync_state_project_unique"),
+	})
 }

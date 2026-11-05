@@ -16,19 +16,28 @@ type Project struct {
 	Active      bool          `bson:"active"             json:"active"`
 	UseJS       bool          `bson:"use_js"             json:"use_js"`
 	MaxPages    int           `bson:"max_pages"          json:"max_pages"`
-	CreatedAt   time.Time     `bson:"created_at"         json:"created_at"`
-	UpdatedAt   time.Time     `bson:"updated_at"         json:"updated_at"`
+	// Google Search Console integration (optional).
+	// GSCPropertyURL: "sc-domain:example.com" or "https://example.com/"
+	GSCPropertyURL string `bson:"gsc_property_url" json:"gsc_property_url"`
+	// GSCServiceAccountJSON: full Google service account JSON key as a string.
+	GSCServiceAccountJSON string    `bson:"gsc_service_account_json" json:"gsc_service_account_json"`
+	CreatedAt             time.Time `bson:"created_at"               json:"created_at"`
+	UpdatedAt             time.Time `bson:"updated_at"               json:"updated_at"`
 }
 
 // ProjectUpdateInput contains the fields that can be updated on a Project
 type ProjectUpdateInput struct {
-	Name        string    `bson:"name,omitempty"        json:"name"`
-	URL         string    `bson:"url,omitempty"         json:"url"`
-	Description string    `bson:"description,omitempty" json:"description"`
-	Active      *bool     `bson:"active,omitempty"      json:"active"`
-	UseJS       *bool     `bson:"use_js,omitempty"      json:"use_js"`
-	MaxPages    *int      `bson:"max_pages,omitempty"   json:"max_pages"`
-	UpdatedAt   time.Time `bson:"updated_at"            json:"-"`
+	Name        string `bson:"name,omitempty"        json:"name"`
+	URL         string `bson:"url,omitempty"         json:"url"`
+	Description string `bson:"description,omitempty" json:"description"`
+	Active      *bool  `bson:"active,omitempty"      json:"active"`
+	UseJS       *bool  `bson:"use_js,omitempty"      json:"use_js"`
+	MaxPages    *int   `bson:"max_pages,omitempty"   json:"max_pages"`
+	// GSCPropertyURL: "sc-domain:example.com" or "https://example.com/"
+	GSCPropertyURL *string `bson:"gsc_property_url,omitempty" json:"gsc_property_url"`
+	// GSCServiceAccountJSON: full Google service account JSON key as a string.
+	GSCServiceAccountJSON *string   `bson:"gsc_service_account_json,omitempty" json:"gsc_service_account_json"`
+	UpdatedAt             time.Time `bson:"updated_at"                json:"-"`
 }
 
 // ProjectConfig describes what the crawler should collect for a specific

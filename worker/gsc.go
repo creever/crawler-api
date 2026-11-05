@@ -5,14 +5,12 @@ package worker
 // needed; we reuse github.com/golang-jwt/jwt/v5 which is already a direct dep.
 
 import (
-	"bytes"
 	"context"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -131,53 +129,15 @@ func (p *Processor) gscQueryAnalytics(ctx context.Context, accessToken, property
 	end := time.Now().UTC().AddDate(0, 0, -3)
 	start := end.AddDate(0, -3, 0)
 
-	reqBody, _ := json.Marshal(map[string]interface{}{
-		"startDate":  start.Format("2006-01-02"),
-		"endDate":    end.Format("2006-01-02"),
-		"dimensions": []string{"query"},
-		"rowLimit":   100,
-		"orderBy": []map[string]string{
-			{"fieldName": "impressions", "sortOrder": "DESCENDING"},
-		},
-	})
-
-	apiURL := fmt.Sprintf(
-		"https://searchconsole.googleapis.com/webmasters/v3/sites/%s/searchAnalytics/query",
-		url.PathEscape(propertyURL),
-	)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(reqBody))
+	rows, err := p.gscSearchAnalytics(ctx, accessToken, propertyURL,
+		start.Format("2006-01-02"), end.Format("2006-01-02"),
+		[]string{"query"}, 100, 0, "impressions")
 	if err != nil {
-		return nil, fmt.Errorf("build GSC analytics request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-
-	resp, err := p.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("GSC analytics request: %w", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("GSC API HTTP %s: %s", resp.Status, truncate(string(b), 300))
+		return nil, err
 	}
 
-	var result struct {
-		Rows []struct {
-			Keys        []string `json:"keys"`
-			Clicks      float64  `json:"clicks"`
-			Impressions float64  `json:"impressions"`
-			CTR         float64  `json:"ctr"`
-			Position    float64  `json:"position"`
-		} `json:"rows"`
-	}
-	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode GSC response: %w", err)
-	}
-
-	queries := make([]gscQuery, 0, len(result.Rows))
-	for _, row := range result.Rows {
+	queries := make([]gscQuery, 0, len(rows))
+	for _, row := range rows {
 		if len(row.Keys) == 0 {
 			continue
 		}
