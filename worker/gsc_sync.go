@@ -97,7 +97,11 @@ func (p *Processor) gscSearchAnalytics(ctx context.Context, accessToken, propert
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("GSC API HTTP %s: %s", resp.Status, truncate(string(b), 300))
+		msg := fmt.Sprintf("GSC API HTTP %s: %s", resp.Status, truncate(string(b), 300))
+		if resp.StatusCode == http.StatusForbidden {
+			msg += " — hint: add the service account email (client_email) as a user in Search Console (Settings → Users and permissions) for this property, enable the Search Console API in the Cloud project, and use the exact property URL (sc-domain:... or https://...)"
+		}
+		return nil, fmt.Errorf("%s", msg)
 	}
 
 	var result struct {
