@@ -139,6 +139,9 @@ func (h *BlogConfigHandler) Update(c *gin.Context) {
 	delete(body, "_id")
 	delete(body, "id")
 	delete(body, "created_at")
+	// A config must never move between projects via update — that silently
+	// "deletes" it from the old project.
+	delete(body, "project_id")
 
 	res, err := h.col().UpdateOne(c.Request.Context(), bson.M{"_id": oid}, bson.M{"$set": body})
 	if err != nil {
