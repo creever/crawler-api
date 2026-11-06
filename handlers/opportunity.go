@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"time"
@@ -20,11 +21,12 @@ import (
 type OpportunityHandler struct {
 	db          *mongo.Database
 	asynqClient *asynq.Client
+	inspector   *asynq.Inspector
 }
 
 // NewOpportunityHandler creates a new OpportunityHandler.
-func NewOpportunityHandler(db *mongo.Database, asynqClient *asynq.Client) *OpportunityHandler {
-	return &OpportunityHandler{db: db, asynqClient: asynqClient}
+func NewOpportunityHandler(db *mongo.Database, asynqClient *asynq.Client, inspector *asynq.Inspector) *OpportunityHandler {
+	return &OpportunityHandler{db: db, asynqClient: asynqClient, inspector: inspector}
 }
 
 // List godoc
@@ -170,4 +172,77 @@ func (h *OpportunityHandler) SuggestForOpportunity(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusAccepted, gin.H{"status": "enqueued", "task_id": info.ID, "opportunity_id": oid.Hex()})
+}
+
+// Status godoc
+// @Summary      Opportunity compute job status for a project
+// @Description  Reports whether an opportunities:compute task is pending or active in the asynq queue, plus when the stored list was last computed and how many rows it has.
+// @Tags         projects
+// @Produce      json
+// @Param        id  path  string  true  "Project ID"
+// @Success      200  {object}  map[string]interface{}
+// @Router       /api/v1/projects/{id}/opportunities/status [get]
+func (h *OpportunityHandler) Status(c *gin.Context) {
+	id, err := bson.ObjectIDFromHex(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid project id"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err = h.db.Collection("projects").FindOne(ctx, gscProjectFilter(c, id)).Decode(&struct{}{}); err != nil {
+		if err == mongo.ErrNoDocuments {
+			c.JSON(http.StatusNotFound, gin.H{"error": "project not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch project"})
+		}
+		return
+	}
+
+	resp := gin.H{"project_id": id.Hex(), "pending": false, "active": false, "count": 0, "last_computed_at": nil}
+
+	if h.inspector != nil {
+		pending, err := h.inspector.ListPendingTasks("default")
+		if err == nil {
+			for _, t := range pending {
+				if t.Type == "opportunities:compute" && payloadHasProject(t.Payload, id.Hex()) {
+					resp["pending"] = true
+				}
+			}
+		}
+		active, err := h.inspector.ListActiveTasks("default")
+		if err == nil {
+			for _, t := range active {
+				if t.Type == "opportunities:compute" && payloadHasProject(t.Payload, id.Hex()) {
+					resp["active"] = true
+				}
+			}
+		}
+	}
+
+	count, _ := h.db.Collection("opportunities").CountDocuments(ctx, bson.M{"project_id": id})
+	resp["count"] = count
+
+	var last struct {
+		ComputedAt time.Time `bson:"computed_at"`
+	}
+	opts := options.FindOne().SetSort(bson.D{{Key: "computed_at", Value: -1}}).SetProjection(bson.M{"computed_at": 1})
+	if err := h.db.Collection("opportunities").FindOne(ctx, bson.M{"project_id": id}, opts).Decode(&last); err == nil {
+		resp["last_computed_at"] = last.ComputedAt
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// payloadHasProject checks whether a JSON task payload references the project.
+func payloadHasProject(payload []byte, projectID string) bool {
+	var p struct {
+		ProjectID string `json:"project_id"`
+	}
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return false
+	}
+	return p.ProjectID == projectID
 }
