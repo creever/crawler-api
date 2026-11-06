@@ -188,6 +188,7 @@ func (p *Processor) HandleGSCSync(ctx context.Context, t *asynq.Task) error {
 
 	col := p.db.Collection("gsc_rows")
 	var totalRows int64
+	lastOK := ""
 	for bucketStart := start; !bucketStart.After(end); bucketStart = bucketStart.AddDate(0, 0, gscBucketDays) {
 		bucketEnd := bucketStart.AddDate(0, 0, gscBucketDays-1)
 		if bucketEnd.After(end) {
@@ -195,10 +196,20 @@ func (p *Processor) HandleGSCSync(ctx context.Context, t *asynq.Task) error {
 		}
 		n, bucketErr := p.syncGSCBucket(ctx, col, projectOID, accessToken, propertyURL, bucketStart, bucketEnd)
 		if bucketErr != nil {
-			p.upsertGSCSyncState(ctx, projectOID, "", now, bucketErr.Error(), totalRows)
+			p.upsertGSCSyncState(ctx, projectOID, lastOK, now, bucketErr.Error(), totalRows)
 			return bucketErr
 		}
 		totalRows += n
+		lastOK = bucketEnd.Format("2006-01-02")
+		// Advance the visible progress marker after every bucket (upserts are
+		// idempotent, so re-running an interrupted bucket is safe).
+		p.upsertGSCSyncState(ctx, projectOID, lastOK, now, "", totalRows)
+		p.logger.Info("gsc:sync bucket done",
+			zap.String("project_id", payload.ProjectID),
+			zap.String("bucket", bucketStart.Format("2006-01-02")+".."+lastOK),
+			zap.Int64("rows", n),
+			zap.Int64("total", totalRows),
+		)
 	}
 
 	p.upsertGSCSyncState(ctx, projectOID, end.Format("2006-01-02"), now, "", totalRows)
