@@ -117,10 +117,24 @@ func (p *Processor) HandleSuggestionsGenerate(ctx context.Context, t *asynq.Task
 	generated := 0
 
 	for _, opp := range targets {
+		// Prefer a fresh crawl of the page at request time so the LLM sees
+		// the actual current content; fall back to the last stored crawl.
 		var seo models.SEOData
-		_ = p.db.Collection("seo_data").FindOne(ctx, bson.M{
+		if fresh, ferr := p.fetchSEO(ctx, opp.Page, project.UseJS); ferr == nil {
+			seo = models.SEOData{
+				URL:             fresh.URL,
+				Title:           fresh.Title,
+				MetaDescription: fresh.MetaDescription,
+				H1Tags:          fresh.H1,
+				H2Tags:          fresh.H2,
+				WordCount:       fresh.WordCount,
+			}
+		} else if derr := p.db.Collection("seo_data").FindOne(ctx, bson.M{
 			"project_id": projectOID, "url": opp.Page,
-		}).Decode(&seo)
+		}).Decode(&seo); derr != nil {
+			p.logger.Warn("suggestions: no crawl data for page, using empty context",
+				zap.String("page", opp.Page), zap.Error(ferr))
+		}
 
 		system, user := buildSuggestionPrompt(opp, seo, project.Name)
 		raw, callErr := callAI(ctx, system, user, 1024)
