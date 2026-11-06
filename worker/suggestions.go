@@ -41,9 +41,21 @@ func (p *Processor) HandleSuggestionsGenerate(ctx context.Context, t *asynq.Task
 		limit = suggestDefaultLimit
 	}
 
-	apiKey, err := p.resolveAnthropicKey(ctx, projectOID)
+	provider, apiKey, err := p.resolveSuggestionAI(ctx, projectOID)
 	if err != nil {
 		return fmt.Errorf("%w: %v", asynq.SkipRetry, err)
+	}
+	callAI := func(ctx context.Context, system, user string, maxTokens int) (string, error) {
+		switch provider {
+		case models.BlogAIProviderMistral:
+			return p.callMistralAPI(ctx, apiKey, system, user, maxTokens)
+		case models.BlogAIProviderGemini:
+			var cfg models.BlogConfig
+			_ = p.db.Collection("blog_configs").FindOne(ctx, bson.M{"project_id": projectOID, "active": true}).Decode(&cfg)
+			return p.callGeminiTextAPI(ctx, cfg.GeminiAPIKey, system, user)
+		default:
+			return p.callClaudeAPI(ctx, apiKey, system, user, maxTokens)
+		}
 	}
 
 	// Targets: either the single requested opportunity, or the top actionable
@@ -106,7 +118,7 @@ func (p *Processor) HandleSuggestionsGenerate(ctx context.Context, t *asynq.Task
 		}).Decode(&seo)
 
 		system, user := buildSuggestionPrompt(opp, seo)
-		raw, callErr := p.callClaudeAPI(ctx, apiKey, system, user, 1024)
+		raw, callErr := callAI(ctx, system, user, 1024)
 		if callErr != nil {
 			p.logger.Warn("suggestions:generate claude call failed",
 				zap.String("page", opp.Page), zap.Error(callErr))

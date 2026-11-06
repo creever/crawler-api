@@ -258,7 +258,21 @@ func (h *SuggestionHandler) Status(c *gin.Context) {
 		return
 	}
 
-	resp := gin.H{"project_id": id.Hex(), "pending": false, "active": false, "pending_count": 0}
+	resp := gin.H{"project_id": id.Hex(), "pending": false, "active": false, "pending_count": 0, "last_task_error": nil}
+
+	// Surface the last failure of a suggestions:generate task for this project
+	// from archived (failed) asynq tasks, so a silently empty run is visible.
+	if h.inspector != nil {
+		archived, archErr := h.inspector.ListArchivedTasks("default", asynq.PageSize(20))
+		if archErr == nil {
+			for _, t := range archived {
+				if t.Type == "suggestions:generate" && payloadHasProject(t.Payload, id.Hex()) {
+					resp["last_task_error"] = t.LastErr
+					break
+				}
+			}
+		}
+	}
 
 	if h.inspector != nil {
 		pending, err := h.inspector.ListPendingTasks("default")
