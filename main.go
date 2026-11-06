@@ -65,6 +65,7 @@ func main() {
 	worker.StartGSCScheduler(database, asynqClient, logger)
 	worker.StartOpportunityScheduler(database, asynqClient, logger)
 	worker.StartSuggestionScheduler(database, asynqClient, logger)
+	worker.StartGA4Scheduler(database, asynqClient, logger)
 
 	// GIN
 	gin.SetMode(cfg.GinMode)

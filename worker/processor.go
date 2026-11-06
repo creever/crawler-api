@@ -50,6 +50,7 @@ func (p *Processor) Register(mux *asynq.ServeMux) {
 	mux.HandleFunc(TypeGSCSync, p.HandleGSCSync)
 	mux.HandleFunc(TypeComputeOpps, p.HandleComputeOpportunities)
 	mux.HandleFunc(TypeGenSuggest, p.HandleSuggestionsGenerate)
+	mux.HandleFunc("ga4:sync", p.HandleGA4Sync)
 }
 
 // NewServer creates a pre-configured asynq.Server backed by Redis at redisAddr.
