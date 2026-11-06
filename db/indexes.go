@@ -113,4 +113,22 @@ func EnsureIndexes(database *mongo.Database, logger *zap.Logger) {
 		},
 		Options: options.Index().SetName("suggestions_project_status"),
 	})
+
+	// applied_changes: per-project impact listing
+	create("applied_changes", mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "project_id", Value: 1},
+			{Key: "applied_at", Value: -1},
+		},
+		Options: options.Index().SetName("applied_changes_project_date"),
+	})
+
+	// applied_changes: per-page lookup
+	create("applied_changes", mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "project_id", Value: 1},
+			{Key: "page", Value: 1},
+		},
+		Options: options.Index().SetName("applied_changes_project_page"),
+	})
 }

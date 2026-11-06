@@ -43,6 +43,7 @@ func Setup(router *gin.Engine, db *mongo.Database, logger *zap.Logger, corsOrigi
 	gscH := handlers.NewGSCHandler(db, asynqClient)
 	oppH := handlers.NewOpportunityHandler(db, asynqClient)
 	sugH := handlers.NewSuggestionHandler(db, asynqClient)
+	applyH := handlers.NewApplyHandler(db)
 	authH := handlers.NewAuthHandler(db, jwtSecret, cfg.JWTExpirySec, cfg.JWTRefreshExpSec)
 	userH := handlers.NewUserHandler(db)
 
@@ -83,6 +84,8 @@ func Setup(router *gin.Engine, db *mongo.Database, logger *zap.Logger, corsOrigi
 				projects.GET("/:id/suggestions", sugH.List)
 				projects.POST("/:id/suggestions/generate", sugH.Generate)
 				projects.PATCH("/:id/suggestions/:sid/review", sugH.Review)
+				projects.POST("/:id/suggestions/:sid/apply", applyH.Apply)
+				projects.GET("/:id/impact", applyH.Impact)
 			}
 
 			// SEO Analytics

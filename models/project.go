@@ -20,9 +20,15 @@ type Project struct {
 	// GSCPropertyURL: "sc-domain:example.com" or "https://example.com/"
 	GSCPropertyURL string `bson:"gsc_property_url" json:"gsc_property_url"`
 	// GSCServiceAccountJSON: full Google service account JSON key as a string.
-	GSCServiceAccountJSON string    `bson:"gsc_service_account_json" json:"gsc_service_account_json"`
-	CreatedAt             time.Time `bson:"created_at"               json:"created_at"`
-	UpdatedAt             time.Time `bson:"updated_at"               json:"updated_at"`
+	GSCServiceAccountJSON string `bson:"gsc_service_account_json" json:"gsc_service_account_json"`
+	// Site adapter used to push approved changes to the target site.
+	// AdapterType: e.g. "cipomarket" (empty = no adapter configured).
+	AdapterType string `bson:"adapter_type"     json:"adapter_type"`
+	// AdapterEndpoint / AdapterAPIKey configure the adapter's target API.
+	AdapterEndpoint string    `bson:"adapter_endpoint" json:"adapter_endpoint"`
+	AdapterAPIKey   string    `bson:"adapter_api_key"  json:"adapter_api_key"`
+	CreatedAt       time.Time `bson:"created_at"       json:"created_at"`
+	UpdatedAt       time.Time `bson:"updated_at"               json:"updated_at"`
 }
 
 // ProjectUpdateInput contains the fields that can be updated on a Project
@@ -37,7 +43,10 @@ type ProjectUpdateInput struct {
 	GSCPropertyURL *string `bson:"gsc_property_url,omitempty" json:"gsc_property_url"`
 	// GSCServiceAccountJSON: full Google service account JSON key as a string.
 	GSCServiceAccountJSON *string   `bson:"gsc_service_account_json,omitempty" json:"gsc_service_account_json"`
-	UpdatedAt             time.Time `bson:"updated_at"                json:"-"`
+	AdapterType           *string   `bson:"adapter_type,omitempty"     json:"adapter_type"`
+	AdapterEndpoint       *string   `bson:"adapter_endpoint,omitempty" json:"adapter_endpoint"`
+	AdapterAPIKey         *string   `bson:"adapter_api_key,omitempty"  json:"adapter_api_key"`
+	UpdatedAt             time.Time `bson:"updated_at"              json:"-"`
 }
 
 // ProjectConfig describes what the crawler should collect for a specific
