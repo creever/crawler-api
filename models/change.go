@@ -1,0 +1,36 @@
+package models
+
+import (
+	"time"
+
+	"go.mongodb.org/mongo-driver/v2/bson"
+)
+
+// AppliedChange logs one approved suggestion that was pushed to the target
+// site via a site adapter, together with the "before" GSC snapshot used for
+// impact tracking.
+// MongoDB collection: applied_changes
+type AppliedChange struct {
+	ID           bson.ObjectID  `bson:"_id,omitempty"   json:"id,omitempty"`
+	ProjectID    bson.ObjectID  `bson:"project_id"      json:"project_id"`
+	SuggestionID *bson.ObjectID `bson:"suggestion_id,omitempty" json:"suggestion_id,omitempty"`
+	Kind         string         `bson:"kind"            json:"kind"` // title | meta_description | category_text
+	Page         string         `bson:"page"            json:"page"`
+	Value        string         `bson:"value"           json:"value"`   // the text that was applied
+	Adapter      string         `bson:"adapter"         json:"adapter"` // e.g. "cipomarket"
+	Status       string         `bson:"status"          json:"status"`  // applied | failed
+	Error        string         `bson:"error,omitempty" json:"error,omitempty"`
+	AppliedBy    *bson.ObjectID `bson:"applied_by,omitempty" json:"applied_by,omitempty"`
+	AppliedAt    time.Time      `bson:"applied_at"      json:"applied_at"`
+	// BeforeSnapshot holds the page's GSC aggregates for the 28 days before
+	// AppliedAt, captured at apply time (GSC revises numbers retroactively).
+	BeforeSnapshot PageMetrics `bson:"before_snapshot" json:"before_snapshot"`
+}
+
+// PageMetrics is a clicks/impressions/CTR/position aggregate for one page.
+type PageMetrics struct {
+	Clicks      float64 `bson:"clicks"      json:"clicks"`
+	Impressions float64 `bson:"impressions" json:"impressions"`
+	CTR         float64 `bson:"ctr"         json:"ctr"`
+	Position    float64 `bson:"position"    json:"position"`
+}
