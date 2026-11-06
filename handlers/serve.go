@@ -408,12 +408,12 @@ func classifyRequester(ua string) models.RequesterType {
 	// Generic bots / crawlers / spiders.
 	botKeywords := []string{
 		"bot", "crawler", "spider",
-		"slurp",   // Yahoo
-		"baidu",   // Baidu
-		"yandex",  // Yandex
+		"slurp",    // Yahoo
+		"baidu",    // Baidu
+		"yandex",   // Yandex
 		"duckduck", // DuckDuckGo
-		"sogou",   // Sogou
-		"exabot",  // Exabot
+		"sogou",    // Sogou
+		"exabot",   // Exabot
 		"facebot",
 		"ia_archiver", // Wayback Machine
 		"scraper",

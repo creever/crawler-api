@@ -60,8 +60,12 @@ func (p *Processor) HandleGA4Sync(ctx context.Context, t *asynq.Task) error {
 	if err = p.db.Collection("projects").FindOne(ctx, bson.M{"_id": projectOID}).Decode(&project); err != nil {
 		return fmt.Errorf("%w: project not found: %v", asynq.SkipRetry, err)
 	}
-	if project.GA4PropertyID == "" || project.GSCServiceAccountJSON == "" {
-		return fmt.Errorf("%w: project %s has no GA4 configuration (ga4_property_id / gsc_service_account_json)", asynq.SkipRetry, payload.ProjectID)
+	if project.GA4PropertyID == "" {
+		return fmt.Errorf("%w: project %s has no ga4_property_id configured", asynq.SkipRetry, payload.ProjectID)
+	}
+	_, credentials, cfgErr := ResolveGSCConfig(ctx, p.db, project)
+	if cfgErr != nil {
+		return fmt.Errorf("%w: %v", asynq.SkipRetry, cfgErr)
 	}
 
 	now := time.Now().UTC()
@@ -102,7 +106,7 @@ func (p *Processor) HandleGA4Sync(ctx context.Context, t *asynq.Task) error {
 	}
 
 	var sa serviceAccountKey
-	if err = json.Unmarshal([]byte(project.GSCServiceAccountJSON), &sa); err != nil {
+	if err = json.Unmarshal([]byte(credentials), &sa); err != nil {
 		return fmt.Errorf("%w: parse service account credentials: %v", asynq.SkipRetry, err)
 	}
 	accessToken, err := p.googleAccessToken(ctx, sa, "https://www.googleapis.com/auth/analytics.readonly")

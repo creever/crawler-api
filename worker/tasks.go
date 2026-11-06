@@ -24,7 +24,7 @@ const (
 // It carries the queue-entry ID (so the worker can update its status in
 // MongoDB) and the ProjectConfig that drives the crawler.
 type CrawlPayload struct {
-	QueueEntryID string              `json:"queue_entry_id"`
+	QueueEntryID string               `json:"queue_entry_id"`
 	Config       models.ProjectConfig `json:"config"`
 }
 
@@ -129,7 +129,7 @@ func NewComputeOppsTask(projectID string) (*asynq.Task, error) {
 // GenSuggestPayload is the JSON payload for a suggestions:generate task.
 type GenSuggestPayload struct {
 	ProjectID string `json:"project_id"`
-	Limit     int    `json:"limit,omitempty"`       // max opportunities to process (default 10)
+	Limit     int    `json:"limit,omitempty"` // max opportunities to process (default 10)
 	// OpportunityID restricts generation to a single opportunity (ad-hoc
 	// request from the UI).
 	OpportunityID string `json:"opportunity_id,omitempty"`

@@ -66,8 +66,8 @@ func (h *GSCHandler) TriggerSync(c *gin.Context) {
 		}
 		return
 	}
-	if project.GSCPropertyURL == "" || project.GSCServiceAccountJSON == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "project has no GSC configuration (gsc_property_url / gsc_service_account_json)"})
+	if _, _, cfgErr := worker.ResolveGSCConfig(ctx, h.db, project); cfgErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": cfgErr.Error()})
 		return
 	}
 

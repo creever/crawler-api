@@ -19,6 +19,25 @@ import (
 	"github.com/creever/crawler-api/models"
 )
 
+// ResolveGSCConfig returns the GSC property URL and service-account JSON for
+// a project. The project fields (gsc_property_url / gsc_service_account_json)
+// take precedence; if they are empty, the project's active blog config
+// (search_console_property_url / search_console_credentials) is used as a
+// fallback, so configuring GSC in Blog Settings is enough.
+func ResolveGSCConfig(ctx context.Context, db *mongo.Database, project models.Project) (propertyURL, credentials string, err error) {
+	if project.GSCPropertyURL != "" && project.GSCServiceAccountJSON != "" {
+		return project.GSCPropertyURL, project.GSCServiceAccountJSON, nil
+	}
+	var cfg models.BlogConfig
+	cfgErr := db.Collection("blog_configs").FindOne(ctx, bson.M{
+		"project_id": project.ID, "active": true,
+	}).Decode(&cfg)
+	if cfgErr == nil && cfg.SearchConsolePropertyURL != "" && cfg.SearchConsoleCredentials != "" {
+		return cfg.SearchConsolePropertyURL, cfg.SearchConsoleCredentials, nil
+	}
+	return "", "", fmt.Errorf("no GSC configuration: set gsc_property_url + gsc_service_account_json on the project, or search_console_property_url + search_console_credentials in Blog Settings")
+}
+
 const (
 	// gscMaxRowLimit is the Search Analytics API hard cap per request.
 	gscMaxRowLimit = 25000
@@ -109,8 +128,9 @@ func (p *Processor) HandleGSCSync(ctx context.Context, t *asynq.Task) error {
 	if err = p.db.Collection("projects").FindOne(ctx, bson.M{"_id": projectOID}).Decode(&project); err != nil {
 		return fmt.Errorf("%w: project not found: %v", asynq.SkipRetry, err)
 	}
-	if project.GSCPropertyURL == "" || project.GSCServiceAccountJSON == "" {
-		return fmt.Errorf("%w: project %s has no GSC configuration", asynq.SkipRetry, payload.ProjectID)
+	propertyURL, credentials, cfgErr := ResolveGSCConfig(ctx, p.db, project)
+	if cfgErr != nil {
+		return fmt.Errorf("%w: %v", asynq.SkipRetry, cfgErr)
 	}
 
 	now := time.Now().UTC()
@@ -153,7 +173,7 @@ func (p *Processor) HandleGSCSync(ctx context.Context, t *asynq.Task) error {
 	}
 
 	var sa serviceAccountKey
-	if err = json.Unmarshal([]byte(project.GSCServiceAccountJSON), &sa); err != nil {
+	if err = json.Unmarshal([]byte(credentials), &sa); err != nil {
 		return fmt.Errorf("%w: parse service account credentials: %v", asynq.SkipRetry, err)
 	}
 	accessToken, err := p.gscGetAccessToken(ctx, sa)
@@ -169,7 +189,7 @@ func (p *Processor) HandleGSCSync(ctx context.Context, t *asynq.Task) error {
 		if bucketEnd.After(end) {
 			bucketEnd = end
 		}
-		n, bucketErr := p.syncGSCBucket(ctx, col, projectOID, accessToken, project.GSCPropertyURL, bucketStart, bucketEnd)
+		n, bucketErr := p.syncGSCBucket(ctx, col, projectOID, accessToken, propertyURL, bucketStart, bucketEnd)
 		if bucketErr != nil {
 			p.upsertGSCSyncState(ctx, projectOID, "", now, bucketErr.Error(), totalRows)
 			return bucketErr
