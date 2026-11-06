@@ -152,6 +152,9 @@ func (p *Processor) HandleGSCSync(ctx context.Context, t *asynq.Task) error {
 		if err != nil {
 			return fmt.Errorf("%w: invalid start_date: %v", asynq.SkipRetry, err)
 		}
+	case payload.Backfill:
+		// Explicit full-history refetch.
+		start = end.AddDate(0, -gscBackfillMonths, 0)
 	default:
 		var state models.GSCSyncState
 		stateErr := p.db.Collection("gsc_sync_state").FindOne(ctx, bson.M{"project_id": projectOID}).Decode(&state)
