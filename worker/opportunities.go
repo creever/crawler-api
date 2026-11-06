@@ -19,8 +19,8 @@ import (
 const (
 	// oppWindowDays is the comparison window: current 28d vs previous 28d.
 	oppWindowDays = 28
-	// oppMinImpressions filters noise: queries/pages below this are ignored.
-	oppMinImpressions = 500
+	// oppMinImpressions filters noise: query×page pairs below this over 28d are ignored (low for pilot scale).
+	oppMinImpressions = 100
 	// oppCrawlIssueTopPages caps how many traffic pages are checked for crawl issues.
 	oppCrawlIssueTopPages = 50
 )
@@ -157,7 +157,7 @@ func (p *Processor) HandleComputeOpportunities(ctx context.Context, t *asynq.Tas
 	}
 	for _, r := range curPages {
 		prev := prevByPage[r.ID]
-		if prev < 10 || r.Clicks >= prev*0.8 {
+		if prev < 5 || r.Clicks >= prev*0.8 {
 			continue
 		}
 		opps = append(opps, models.Opportunity{
@@ -330,7 +330,7 @@ func (p *Processor) crawlIssueOpportunities(ctx context.Context, projectOID bson
 
 	var opps []models.Opportunity
 	for _, pg := range sorted {
-		if pg.Clicks < 10 {
+		if pg.Clicks < 5 {
 			continue
 		}
 		var seo models.SEOData
