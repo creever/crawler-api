@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -300,36 +301,17 @@ func firstOrEmpty(s []string) string {
 	return s[0]
 }
 
-// stripHTML removes tags and collapses whitespace from an HTML document.
+// stripHTML removes script/style bodies and all tags, collapsing whitespace.
 func stripHTML(html string) string {
-	var sb strings.Builder
-	inTag := false
-	space := false
-	for _, r := range html {
-		switch {
-		case r == '<':
-			inTag = true
-			space = true
-		case r == '>':
-			inTag = false
-		case inTag:
-			// skip tag content
-		default:
-			if r == '\n' || r == '\t' || r == '\r' {
-				r = ' '
-			}
-			if r == ' ' {
-				if space {
-					continue
-				}
-				space = true
-			} else {
-				space = false
-			}
-			sb.WriteRune(r)
-		}
-	}
-	return strings.TrimSpace(sb.String())
+	reScript := regexp.MustCompile(`(?is)<(script|style)[^>]*>.*?</(script|style)>`)
+	reTag := regexp.MustCompile(`(?s)<[^>]*>`)
+	reSpace := regexp.MustCompile(`\s+`)
+	rePrePunct := regexp.MustCompile(`\s+([.,;:!?])`)
+	s := reScript.ReplaceAllString(html, " ")
+	s = reTag.ReplaceAllString(s, " ")
+	s = reSpace.ReplaceAllString(s, " ")
+	s = rePrePunct.ReplaceAllString(s, "$1")
+	return strings.TrimSpace(s)
 }
 
 // truncateText cuts s to n runes, appending an ellipsis marker.
