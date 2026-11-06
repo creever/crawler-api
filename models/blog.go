@@ -23,8 +23,9 @@ const (
 type BlogAIProvider string
 
 const (
-	BlogAIProviderClaude BlogAIProvider = "claude" // default
-	BlogAIProviderGemini BlogAIProvider = "gemini"
+	BlogAIProviderClaude  BlogAIProvider = "claude" // default
+	BlogAIProviderGemini  BlogAIProvider = "gemini"
+	BlogAIProviderMistral BlogAIProvider = "mistral"
 )
 
 // BlogConfig stores per-project settings for the blog generation pipeline.
@@ -35,6 +36,7 @@ type BlogConfig struct {
 	Active          bool          `bson:"active"        json:"active"`
 	GeminiAPIKey    string        `bson:"gemini_api_key"    json:"gemini_api_key"`
 	AnthropicAPIKey string        `bson:"anthropic_api_key" json:"anthropic_api_key"`
+	MistralAPIKey   string        `bson:"mistral_api_key"   json:"mistral_api_key"`
 	// WritingProvider controls which LLM is used for steps 2-4.
 	// "claude" (default) uses the Anthropic API; "gemini" uses the Gemini text API.
 	WritingProvider BlogAIProvider `bson:"writing_provider" json:"writing_provider"`
