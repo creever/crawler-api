@@ -13,7 +13,22 @@ import (
 	"github.com/creever/crawler-api/models"
 )
 
-const mistralModel = "mistral-large-latest"
+const defaultMistralModel = "mistral-large-latest"
+
+// AvailableModels lists selectable models per provider.
+var AvailableModels = map[string][]string{
+	"claude":  {"claude-sonnet-4-6", "claude-opus-4-1", "claude-haiku-4-5"},
+	"mistral": {"mistral-large-latest", "mistral-medium-latest", "mistral-small-latest"},
+	"gemini":  {"gemini-2.0-flash", "gemini-2.5-pro"},
+}
+
+// DefaultModel returns the default model for a provider.
+func DefaultModel(provider string) string {
+	if ms := AvailableModels[provider]; len(ms) > 0 {
+		return ms[0]
+	}
+	return ""
+}
 
 type mistralRequest struct {
 	Model       string       `json:"model"`
@@ -39,16 +54,19 @@ type mistralResponse struct {
 }
 
 // callMistralAPI calls the Mistral chat completions API.
-func (p *Processor) callMistralAPI(ctx context.Context, apiKey, systemPrompt, userMessage string, maxTokens int) (string, error) {
+func (p *Processor) callMistralAPI(ctx context.Context, apiKey, model, systemPrompt, userMessage string, maxTokens int) (string, error) {
 	if apiKey == "" {
 		return "", fmt.Errorf("mistral API key not configured")
 	}
 	if maxTokens <= 0 {
 		maxTokens = 1024
 	}
+	if model == "" {
+		model = defaultMistralModel
+	}
 
 	reqBody := mistralRequest{
-		Model:     mistralModel,
+		Model:     model,
 		MaxTokens: maxTokens,
 		Messages: []mistralMsg{
 			{Role: "system", Content: systemPrompt},
@@ -95,7 +113,7 @@ func (p *Processor) callMistralAPI(ctx context.Context, apiKey, systemPrompt, us
 // back to the project's active blog config writing_provider, default claude.
 // The key is read from the matching blog-config field or the global
 // "<provider>_api_key" setting.
-func (p *Processor) resolveSuggestionAI(ctx context.Context, projectOID bson.ObjectID) (models.BlogAIProvider, string, error) {
+func (p *Processor) resolveSuggestionAI(ctx context.Context, projectOID bson.ObjectID) (models.BlogAIProvider, string, string, error) {
 	provider := models.BlogAIProvider("")
 
 	var s models.Setting
@@ -134,7 +152,18 @@ func (p *Processor) resolveSuggestionAI(ctx context.Context, projectOID bson.Obj
 		}
 	}
 	if key == "" {
-		return "", "", fmt.Errorf("no %s API key configured for project (blog config %s_api_key or settings %s)", provider, provider, provider+"_api_key")
+		return "", "", "", fmt.Errorf("no %s API key configured for project (blog config %s_api_key or settings %s)", provider, provider, provider+"_api_key")
 	}
-	return provider, key, nil
+
+	model := cfg.AIModel
+	if model == "" {
+		var ms models.Setting
+		if err := p.db.Collection("settings").FindOne(ctx, bson.M{"key": "ai_model"}).Decode(&ms); err == nil && ms.Value != "" {
+			model = ms.Value
+		}
+	}
+	if model == "" {
+		model = DefaultModel(string(provider))
+	}
+	return provider, key, model, nil
 }

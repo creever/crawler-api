@@ -72,6 +72,10 @@ func Setup(router *gin.Engine, db *mongo.Database, logger *zap.Logger, corsOrigi
 			// Dashboard
 			protected.GET("/dashboard", dashboardH.Get)
 
+			// AI providers / models
+			aiH := handlers.NewAIHandler()
+			protected.GET("/ai/models", aiH.Models)
+
 			// Projects
 			projects := protected.Group("/projects")
 			{
