@@ -37,6 +37,8 @@ type BlogConfig struct {
 	GeminiAPIKey    string        `bson:"gemini_api_key"    json:"gemini_api_key"`
 	AnthropicAPIKey string        `bson:"anthropic_api_key" json:"anthropic_api_key"`
 	MistralAPIKey   string        `bson:"mistral_api_key"   json:"mistral_api_key"`
+	// AIModel optionally overrides the model per provider (e.g. "mistral-large-latest").
+	AIModel string `bson:"ai_model" json:"ai_model"`
 	// WritingProvider controls which LLM is used for steps 2-4.
 	// "claude" (default) uses the Anthropic API; "gemini" uses the Gemini text API.
 	WritingProvider BlogAIProvider `bson:"writing_provider" json:"writing_provider"`
@@ -55,9 +57,9 @@ type BlogConfig struct {
 	// SearchConsolePropertyURL: "sc-domain:example.com" or "https://example.com/"
 	SearchConsolePropertyURL string `bson:"search_console_property_url" json:"search_console_property_url"`
 	// SearchConsoleCredentials: full Google service account JSON key as a string.
-	SearchConsoleCredentials string `bson:"search_console_credentials" json:"search_console_credentials"`
-	CreatedAt       time.Time  `bson:"created_at" json:"created_at"`
-	UpdatedAt       time.Time  `bson:"updated_at" json:"updated_at"`
+	SearchConsoleCredentials string    `bson:"search_console_credentials" json:"search_console_credentials"`
+	CreatedAt                time.Time `bson:"created_at" json:"created_at"`
+	UpdatedAt                time.Time `bson:"updated_at" json:"updated_at"`
 }
 
 // BlogKeyword is one keyword opportunity produced by the clustering step.

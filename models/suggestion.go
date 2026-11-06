@@ -45,7 +45,7 @@ type Suggestion struct {
 	RawResponse string         `bson:"raw_response"     json:"raw_response"`
 	ReviewedBy  *bson.ObjectID `bson:"reviewed_by,omitempty" json:"reviewed_by,omitempty"`
 	// AppliedAt is set when the suggestion was pushed to the site via an adapter.
-	AppliedAt   *time.Time     `bson:"applied_at,omitempty" json:"applied_at,omitempty"`
-	CreatedAt   time.Time      `bson:"created_at"       json:"created_at"`
-	UpdatedAt   time.Time      `bson:"updated_at"       json:"updated_at"`
+	AppliedAt *time.Time `bson:"applied_at,omitempty" json:"applied_at,omitempty"`
+	CreatedAt time.Time  `bson:"created_at"       json:"created_at"`
+	UpdatedAt time.Time  `bson:"updated_at"       json:"updated_at"`
 }

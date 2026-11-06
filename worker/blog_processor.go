@@ -285,7 +285,7 @@ func (p *Processor) aiCaller(cfg models.BlogConfig) aiCallFunc {
 		}
 	}
 	return func(ctx context.Context, system, user string, maxTokens int) (string, error) {
-		return p.callClaudeAPI(ctx, cfg.AnthropicAPIKey, system, user, maxTokens)
+		return p.callClaudeAPI(ctx, cfg.AnthropicAPIKey, cfg.AIModel, system, user, maxTokens)
 	}
 }
 
@@ -435,13 +435,16 @@ type claudeResponse struct {
 }
 
 // callClaudeAPI sends a single-turn request to the Anthropic Messages API.
-func (p *Processor) callClaudeAPI(ctx context.Context, apiKey, systemPrompt, userMessage string, maxTokens int) (string, error) {
+func (p *Processor) callClaudeAPI(ctx context.Context, apiKey, model, systemPrompt, userMessage string, maxTokens int) (string, error) {
 	if apiKey == "" {
 		return "", fmt.Errorf("anthropic API key not configured")
 	}
 
+	if model == "" {
+		model = "claude-sonnet-4-6"
+	}
 	reqBody := claudeRequest{
-		Model:     "claude-sonnet-4-6",
+		Model:     model,
 		MaxTokens: maxTokens,
 		System:    systemPrompt,
 		Messages:  []claudeMessage{{Role: "user", Content: userMessage}},
