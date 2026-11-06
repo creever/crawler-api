@@ -54,3 +54,26 @@ func TestParseFloat(t *testing.T) {
 		t.Errorf("parseFloat(garbage) = %v, want 0", got)
 	}
 }
+
+func TestStripHTML(t *testing.T) {
+	html := `<html><head><style>body{color:red}</style></head><body>
+		<h1>Batz cipők</h1>
+		<p>Kategória   leírás <a href="/batz/cipok">cipők</a> és <a href="/batz/kiegeszitok">kiegészítők</a>.</p>
+		<script>alert(1)</script>
+	</body></html>`
+	got := stripHTML(html)
+	want := "Batz cipők Kategória leírás cipők és kiegészítők."
+	if got != want {
+		t.Errorf("stripHTML = %q, want %q", got, want)
+	}
+}
+
+func TestTruncateText(t *testing.T) {
+	s := "aaaaabbbbb"
+	if got := truncateText(s, 5); got != "aaaaa …" {
+		t.Errorf("truncateText = %q", got)
+	}
+	if got := truncateText("abc", 10); got != "abc" {
+		t.Errorf("truncateText short = %q", got)
+	}
+}

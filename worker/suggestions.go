@@ -136,7 +136,14 @@ func (p *Processor) HandleSuggestionsGenerate(ctx context.Context, t *asynq.Task
 				zap.String("page", opp.Page), zap.Error(ferr))
 		}
 
-		system, user := buildSuggestionPrompt(opp, seo, project.Name)
+		// Fetch the full rendered HTML and extract visible text so the LLM
+		// sees categories, listed products and links — not just H1/word count.
+		contentExcerpt := ""
+		if html, _, rerr := p.fetchRender(ctx, opp.Page, project.UseJS); rerr == nil {
+			contentExcerpt = truncateText(stripHTML(html), 4000)
+		}
+
+		system, user := buildSuggestionPrompt(opp, seo, project.Name, contentExcerpt)
 		raw, callErr := callAI(ctx, system, user, 1024)
 		if callErr != nil {
 			p.logger.Warn("suggestions:generate claude call failed",
@@ -233,7 +240,7 @@ func (p *Processor) resolveAnthropicKey(ctx context.Context, projectOID bson.Obj
 // improved SEO texts in Hungarian, returned as strict JSON. The brand and the
 // page's own content signals are included so the model never invents
 // unrelated brand keywords.
-func buildSuggestionPrompt(opp models.Opportunity, seo models.SEOData, brand string) (string, string) {
+func buildSuggestionPrompt(opp models.Opportunity, seo models.SEOData, brand, contentExcerpt string) (string, string) {
 	system := `You are an SEO copywriter for a Hungarian e-commerce website (webshop).
 You write concise, click-worthy Hungarian texts.
 Rules:
@@ -258,9 +265,13 @@ Current title: %q
 Current meta description: %q
 Current H1: %q
 Page word count: %d
+Page content excerpt (visible text, links and listed products):
+"""
+%s
+"""
 
-Generate improved Hungarian title, meta description and (if applicable) category text for THIS page only.`,
-		brand, opp.Page, opp.Query, opp.Type, opp.Details, metrics, seo.Title, seo.MetaDescription, firstOrEmpty(seo.H1Tags), seo.WordCount)
+Generate improved Hungarian title, meta description and (if applicable) category text for THIS page only. Base the texts on the actual page content above.`,
+		brand, opp.Page, opp.Query, opp.Type, opp.Details, metrics, seo.Title, seo.MetaDescription, firstOrEmpty(seo.H1Tags), seo.WordCount, contentExcerpt)
 	return system, user
 }
 
@@ -287,4 +298,45 @@ func firstOrEmpty(s []string) string {
 		return ""
 	}
 	return s[0]
+}
+
+// stripHTML removes tags and collapses whitespace from an HTML document.
+func stripHTML(html string) string {
+	var sb strings.Builder
+	inTag := false
+	space := false
+	for _, r := range html {
+		switch {
+		case r == '<':
+			inTag = true
+			space = true
+		case r == '>':
+			inTag = false
+		case inTag:
+			// skip tag content
+		default:
+			if r == '\n' || r == '\t' || r == '\r' {
+				r = ' '
+			}
+			if r == ' ' {
+				if space {
+					continue
+				}
+				space = true
+			} else {
+				space = false
+			}
+			sb.WriteRune(r)
+		}
+	}
+	return strings.TrimSpace(sb.String())
+}
+
+// truncateText cuts s to n runes, appending an ellipsis marker.
+func truncateText(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + " …"
 }
