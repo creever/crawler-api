@@ -22,11 +22,12 @@ import (
 type SuggestionHandler struct {
 	db          *mongo.Database
 	asynqClient *asynq.Client
+	inspector   *asynq.Inspector
 }
 
 // NewSuggestionHandler creates a new SuggestionHandler.
-func NewSuggestionHandler(db *mongo.Database, asynqClient *asynq.Client) *SuggestionHandler {
-	return &SuggestionHandler{db: db, asynqClient: asynqClient}
+func NewSuggestionHandler(db *mongo.Database, asynqClient *asynq.Client, inspector *asynq.Inspector) *SuggestionHandler {
+	return &SuggestionHandler{db: db, asynqClient: asynqClient, inspector: inspector}
 }
 
 // List godoc
@@ -228,4 +229,58 @@ func parsePositiveInt(s string) (int, error) {
 		return 0, fmt.Errorf("invalid positive int")
 	}
 	return n, nil
+}
+
+// Status godoc
+// @Summary      Suggestion generation job status for a project
+// @Description  Reports whether a suggestions:generate task is pending/active in the asynq queue, plus counts by status.
+// @Tags         projects
+// @Produce      json
+// @Param        id  path  string  true  "Project ID"
+// @Success      200  {object}  map[string]interface{}
+// @Router       /api/v1/projects/{id}/suggestions/status [get]
+func (h *SuggestionHandler) Status(c *gin.Context) {
+	id, err := bson.ObjectIDFromHex(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid project id"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err = h.db.Collection("projects").FindOne(ctx, gscProjectFilter(c, id)).Decode(&struct{}{}); err != nil {
+		if err == mongo.ErrNoDocuments {
+			c.JSON(http.StatusNotFound, gin.H{"error": "project not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch project"})
+		}
+		return
+	}
+
+	resp := gin.H{"project_id": id.Hex(), "pending": false, "active": false, "pending_count": 0}
+
+	if h.inspector != nil {
+		pending, err := h.inspector.ListPendingTasks("default")
+		if err == nil {
+			for _, t := range pending {
+				if t.Type == "suggestions:generate" && payloadHasProject(t.Payload, id.Hex()) {
+					resp["pending"] = true
+				}
+			}
+		}
+		active, err := h.inspector.ListActiveTasks("default")
+		if err == nil {
+			for _, t := range active {
+				if t.Type == "suggestions:generate" && payloadHasProject(t.Payload, id.Hex()) {
+					resp["active"] = true
+				}
+			}
+		}
+	}
+
+	count, _ := h.db.Collection("suggestions").CountDocuments(ctx, bson.M{"project_id": id, "status": models.SuggestionStatusPending})
+	resp["pending_count"] = count
+
+	c.JSON(http.StatusOK, resp)
 }
