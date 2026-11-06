@@ -36,6 +36,11 @@ func (p *Processor) HandleSuggestionsGenerate(ctx context.Context, t *asynq.Task
 		return fmt.Errorf("%w: invalid project_id: %v", asynq.SkipRetry, err)
 	}
 
+	var project models.Project
+	if err = p.db.Collection("projects").FindOne(ctx, bson.M{"_id": projectOID}).Decode(&project); err != nil {
+		return fmt.Errorf("%w: project not found: %v", asynq.SkipRetry, err)
+	}
+
 	limit := payload.Limit
 	if limit <= 0 {
 		limit = suggestDefaultLimit
@@ -117,7 +122,7 @@ func (p *Processor) HandleSuggestionsGenerate(ctx context.Context, t *asynq.Task
 			"project_id": projectOID, "url": opp.Page,
 		}).Decode(&seo)
 
-		system, user := buildSuggestionPrompt(opp, seo)
+		system, user := buildSuggestionPrompt(opp, seo, project.Name)
 		raw, callErr := callAI(ctx, system, user, 1024)
 		if callErr != nil {
 			p.logger.Warn("suggestions:generate claude call failed",
@@ -210,13 +215,16 @@ func (p *Processor) resolveAnthropicKey(ctx context.Context, projectOID bson.Obj
 	return "", fmt.Errorf("no Anthropic API key configured for project (blog config or settings)")
 }
 
-// buildSuggestionPrompt builds the system + user prompts asking Claude for
-// improved SEO texts in Hungarian, returned as strict JSON.
-func buildSuggestionPrompt(opp models.Opportunity, seo models.SEOData) (string, string) {
+// buildSuggestionPrompt builds the system + user prompts asking the LLM for
+// improved SEO texts in Hungarian, returned as strict JSON. The brand and the
+// page's own content signals are included so the model never invents
+// unrelated brand keywords.
+func buildSuggestionPrompt(opp models.Opportunity, seo models.SEOData, brand string) (string, string) {
 	system := `You are an SEO copywriter for a Hungarian e-commerce website (webshop).
 You write concise, click-worthy Hungarian texts.
 Rules:
-- title: max 60 characters, include the main keyword, no clickbait.
+- ONLY suggest texts that are relevant to the actual page content and its target query. Never introduce brand keywords or products that are not on this page.
+- title: max 60 characters, include the page's main keyword, no clickbait.
 - meta_description: max 160 characters, include a call to action.
 - category_text: only if the page is a category/listing page; 2-4 sentences of Hungarian descriptive text. Otherwise return an empty string.
 Respond with a single JSON object and nothing else:
@@ -227,16 +235,18 @@ Respond with a single JSON object and nothing else:
 		metrics = fmt.Sprintf("impressions=%.0f, clicks=%.0f, ctr=%.2f%%, position=%.1f",
 			opp.Metrics["impressions"], opp.Metrics["clicks"], opp.Metrics["ctr"]*100, opp.Metrics["position"])
 	}
-	user := fmt.Sprintf(`Page: %s
+	user := fmt.Sprintf(`Site brand: %s
+Page: %s
 Target query: %s
 Opportunity type: %s (%s)
 GSC metrics (last 28 days): %s
 Current title: %q
 Current meta description: %q
 Current H1: %q
+Page word count: %d
 
-Generate improved Hungarian title, meta description and (if applicable) category text for this page.`,
-		opp.Page, opp.Query, opp.Type, opp.Details, metrics, seo.Title, seo.MetaDescription, firstOrEmpty(seo.H1Tags))
+Generate improved Hungarian title, meta description and (if applicable) category text for THIS page only.`,
+		brand, opp.Page, opp.Query, opp.Type, opp.Details, metrics, seo.Title, seo.MetaDescription, firstOrEmpty(seo.H1Tags), seo.WordCount)
 	return system, user
 }
 
