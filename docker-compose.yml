@@ -6,6 +6,12 @@ services:
     image: mongo:7
     container_name: crawler-mongo
     restart: unless-stopped
+    # Cap WiredTiger cache so mongod cannot eat the whole 2 GB box.
+    command: ["mongod", "--wiredTigerCacheSizeGB", "${MONGO_CACHE_GB:-0.5}"]
+    deploy:
+      resources:
+        limits:
+          memory: ${MONGO_MEM_LIMIT:-768M}
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-admin}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-changeme}
@@ -28,6 +34,12 @@ services:
     image: redis:7-alpine
     container_name: crawler-redis
     restart: unless-stopped
+    # Bound memory and evict oldest keys instead of growing forever.
+    command: ["redis-server", "--maxmemory", "${REDIS_MAXMEMORY:-128mb}", "--maxmemory-policy", "allkeys-lru"]
+    deploy:
+      resources:
+        limits:
+          memory: ${REDIS_MEM_LIMIT:-192M}
     ports:
       - "6379:6379"
     volumes:
@@ -47,6 +59,10 @@ services:
     container_name: crawler-asynqmon
     restart: unless-stopped
     command: ["--redis-addr=redis:6379", "--port=8090"]
+    deploy:
+      resources:
+        limits:
+          memory: 64M
     depends_on:
       redis:
         condition: service_healthy
@@ -67,11 +83,17 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: ${API_MEM_LIMIT:-512M}
     environment:
       MONGO_URI: mongodb://${MONGO_ROOT_USER:-admin}:${MONGO_ROOT_PASSWORD:-changeme}@mongo:27017/${MONGO_DB:-crawler}?authSource=admin
       MONGO_DB: ${MONGO_DB:-crawler}
       SERVER_PORT: ${SERVER_PORT:-9090}
       GIN_MODE: ${GIN_MODE:-release}
+      # Shrink the Go heap growth on a small box (default GOGC=100).
+      GOGC: ${GOGC:-50}
       # Restrict CORS origins for production: CORS_ORIGINS=https://your-ui.example.com
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
       REDIS_ADDR: ${REDIS_ADDR:-redis:6379}
