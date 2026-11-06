@@ -14,7 +14,7 @@ import (
 
 // DashboardHandler holds dependencies for the dashboard endpoints
 type DashboardHandler struct {
-	db     *mongo.Database
+	db *mongo.Database
 }
 
 // NewDashboardHandler creates a new DashboardHandler

@@ -30,11 +30,9 @@ func checkAndScheduleGSCSyncs(db *mongo.Database, asynqClient *asynq.Client, log
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cursor, err := db.Collection("projects").Find(ctx, bson.M{
-		"active":                   true,
-		"gsc_property_url":         bson.M{"$ne": ""},
-		"gsc_service_account_json": bson.M{"$ne": ""},
-	})
+	// All active projects are candidates — GSC config may live on the project
+	// itself or on its active blog config (resolved per project below).
+	cursor, err := db.Collection("projects").Find(ctx, bson.M{"active": true})
 	if err != nil {
 		logger.Error("GSC scheduler: failed to query projects", zap.Error(err))
 		return
@@ -49,6 +47,9 @@ func checkAndScheduleGSCSyncs(db *mongo.Database, asynqClient *asynq.Client, log
 
 	todayStart := time.Now().UTC().Truncate(24 * time.Hour)
 	for _, project := range projects {
+		if _, _, cfgErr := ResolveGSCConfig(ctx, db, project); cfgErr != nil {
+			continue // no GSC config anywhere for this project
+		}
 		var state models.GSCSyncState
 		stateErr := db.Collection("gsc_sync_state").FindOne(ctx, bson.M{"project_id": project.ID}).Decode(&state)
 		if stateErr == nil && !state.LastRunAt.IsZero() && !state.LastRunAt.Before(todayStart) {

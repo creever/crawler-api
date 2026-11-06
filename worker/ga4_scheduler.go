@@ -29,9 +29,8 @@ func checkAndScheduleGA4Syncs(db *mongo.Database, asynqClient *asynq.Client, log
 	defer cancel()
 
 	cursor, err := db.Collection("projects").Find(ctx, bson.M{
-		"active":                   true,
-		"ga4_property_id":          bson.M{"$ne": ""},
-		"gsc_service_account_json": bson.M{"$ne": ""},
+		"active":          true,
+		"ga4_property_id": bson.M{"$ne": ""},
 	})
 	if err != nil {
 		logger.Error("GA4 scheduler: failed to query projects", zap.Error(err))
@@ -47,6 +46,10 @@ func checkAndScheduleGA4Syncs(db *mongo.Database, asynqClient *asynq.Client, log
 
 	todayStart := time.Now().UTC().Truncate(24 * time.Hour)
 	for _, project := range projects {
+		// The service account may come from the project or its blog config.
+		if _, _, cfgErr := ResolveGSCConfig(ctx, db, project); cfgErr != nil {
+			continue
+		}
 		var state models.GA4SyncState
 		stateErr := db.Collection("ga4_sync_state").FindOne(ctx, bson.M{"project_id": project.ID}).Decode(&state)
 		if stateErr == nil && !state.LastRunAt.IsZero() && !state.LastRunAt.Before(todayStart) {

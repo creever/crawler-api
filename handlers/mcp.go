@@ -251,8 +251,8 @@ func (h *MCPHandler) toolGSCQuery(ctx context.Context, args map[string]interface
 	if err := h.db.Collection("projects").FindOne(ctx, bson.M{"_id": oid}).Decode(&project); err != nil {
 		return nil, "project not found"
 	}
-	if project.GSCPropertyURL == "" || project.GSCServiceAccountJSON == "" {
-		return nil, "project has no GSC configuration: set gsc_property_url and gsc_service_account_json on the project"
+	if _, _, cfgErr := worker.ResolveGSCConfig(ctx, h.db, project); cfgErr != nil {
+		return nil, cfgErr.Error()
 	}
 
 	days := argInt(args, "days", 28)

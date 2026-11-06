@@ -413,10 +413,10 @@ Write the complete blog post now, starting directly with the title. No preamble,
 // ---------------------------------------------------------------------------
 
 type claudeRequest struct {
-	Model     string           `json:"model"`
-	MaxTokens int              `json:"max_tokens"`
-	System    string           `json:"system"`
-	Messages  []claudeMessage  `json:"messages"`
+	Model     string          `json:"model"`
+	MaxTokens int             `json:"max_tokens"`
+	System    string          `json:"system"`
+	Messages  []claudeMessage `json:"messages"`
 }
 
 type claudeMessage struct {
@@ -491,7 +491,7 @@ func (p *Processor) callClaudeAPI(ctx context.Context, apiKey, systemPrompt, use
 // ---------------------------------------------------------------------------
 
 type geminiTextRequest struct {
-	SystemInstruction *geminiContent `json:"system_instruction,omitempty"`
+	SystemInstruction *geminiContent  `json:"system_instruction,omitempty"`
 	Contents          []geminiContent `json:"contents"`
 }
 
