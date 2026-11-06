@@ -29,6 +29,10 @@ func Setup(router *gin.Engine, db *mongo.Database, logger *zap.Logger, corsOrigi
 	serveH := handlers.NewServeHandler(db, asynqClient)
 	router.GET("/prerender", serveH.Serve)
 
+	// Public: MCP endpoint (custom connector for claude.ai), bearer-token auth
+	mcpH := handlers.NewMCPHandler(db, asynqClient)
+	router.POST("/mcp", middleware.RequireMCPToken(db), mcpH.Handle)
+
 	// Instantiate handlers
 	dashboardH := handlers.NewDashboardHandler(db)
 	projectH := handlers.NewProjectHandler(db)
@@ -44,6 +48,7 @@ func Setup(router *gin.Engine, db *mongo.Database, logger *zap.Logger, corsOrigi
 	oppH := handlers.NewOpportunityHandler(db, asynqClient)
 	sugH := handlers.NewSuggestionHandler(db, asynqClient)
 	applyH := handlers.NewApplyHandler(db)
+	ga4H := handlers.NewGA4Handler(db, asynqClient, logger)
 	authH := handlers.NewAuthHandler(db, jwtSecret, cfg.JWTExpirySec, cfg.JWTRefreshExpSec)
 	userH := handlers.NewUserHandler(db)
 
@@ -86,6 +91,9 @@ func Setup(router *gin.Engine, db *mongo.Database, logger *zap.Logger, corsOrigi
 				projects.PATCH("/:id/suggestions/:sid/review", sugH.Review)
 				projects.POST("/:id/suggestions/:sid/apply", applyH.Apply)
 				projects.GET("/:id/impact", applyH.Impact)
+				projects.POST("/:id/ga4/sync", ga4H.TriggerSync)
+				projects.GET("/:id/ga4/status", ga4H.Status)
+				projects.GET("/:id/ga4/report", ga4H.Report)
 			}
 
 			// SEO Analytics

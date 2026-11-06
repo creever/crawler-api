@@ -25,10 +25,13 @@ type Project struct {
 	// AdapterType: e.g. "cipomarket" (empty = no adapter configured).
 	AdapterType string `bson:"adapter_type"     json:"adapter_type"`
 	// AdapterEndpoint / AdapterAPIKey configure the adapter's target API.
-	AdapterEndpoint string    `bson:"adapter_endpoint" json:"adapter_endpoint"`
-	AdapterAPIKey   string    `bson:"adapter_api_key"  json:"adapter_api_key"`
-	CreatedAt       time.Time `bson:"created_at"       json:"created_at"`
-	UpdatedAt       time.Time `bson:"updated_at"               json:"updated_at"`
+	AdapterEndpoint string `bson:"adapter_endpoint" json:"adapter_endpoint"`
+	AdapterAPIKey   string `bson:"adapter_api_key"  json:"adapter_api_key"`
+	// GA4PropertyID is the numeric GA4 property ID (e.g. "123456789"); uses the
+	// same service account as GSC with the analytics.readonly scope.
+	GA4PropertyID string    `bson:"ga4_property_id"  json:"ga4_property_id"`
+	CreatedAt     time.Time `bson:"created_at"       json:"created_at"`
+	UpdatedAt     time.Time `bson:"updated_at"               json:"updated_at"`
 }
 
 // ProjectUpdateInput contains the fields that can be updated on a Project
@@ -46,6 +49,7 @@ type ProjectUpdateInput struct {
 	AdapterType           *string   `bson:"adapter_type,omitempty"     json:"adapter_type"`
 	AdapterEndpoint       *string   `bson:"adapter_endpoint,omitempty" json:"adapter_endpoint"`
 	AdapterAPIKey         *string   `bson:"adapter_api_key,omitempty"  json:"adapter_api_key"`
+	GA4PropertyID         *string   `bson:"ga4_property_id,omitempty"  json:"ga4_property_id"`
 	UpdatedAt             time.Time `bson:"updated_at"              json:"-"`
 }
 

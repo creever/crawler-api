@@ -131,4 +131,29 @@ func EnsureIndexes(database *mongo.Database, logger *zap.Logger) {
 		},
 		Options: options.Index().SetName("applied_changes_project_page"),
 	})
+
+	// ga4_rows: unique row per project × page × date (upsert key)
+	create("ga4_rows", mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "project_id", Value: 1},
+			{Key: "page", Value: 1},
+			{Key: "date", Value: 1},
+		},
+		Options: options.Index().SetUnique(true).SetName("ga4_rows_unique"),
+	})
+
+	// ga4_rows: time-range aggregations per project
+	create("ga4_rows", mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "project_id", Value: 1},
+			{Key: "date", Value: 1},
+		},
+		Options: options.Index().SetName("ga4_rows_project_date"),
+	})
+
+	// ga4_sync_state: one state document per project
+	create("ga4_sync_state", mongo.IndexModel{
+		Keys:    bson.D{{Key: "project_id", Value: 1}},
+		Options: options.Index().SetUnique(true).SetName("ga4_sync_state_project_unique"),
+	})
 }

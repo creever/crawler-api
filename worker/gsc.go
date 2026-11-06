@@ -58,8 +58,14 @@ func (p *Processor) fetchGSCKeywords(ctx context.Context, credentials, propertyU
 }
 
 // gscGetAccessToken exchanges a signed JWT for a Google OAuth2 access token
-// using the JWT Bearer grant (RFC 7523).
+// using the JWT Bearer grant (RFC 7523), scoped for Search Console.
 func (p *Processor) gscGetAccessToken(ctx context.Context, sa serviceAccountKey) (string, error) {
+	return p.googleAccessToken(ctx, sa, "https://www.googleapis.com/auth/webmasters.readonly")
+}
+
+// googleAccessToken exchanges a signed JWT for a Google OAuth2 access token
+// with the given OAuth scope.
+func (p *Processor) googleAccessToken(ctx context.Context, sa serviceAccountKey, scope string) (string, error) {
 	block, _ := pem.Decode([]byte(sa.PrivateKey))
 	if block == nil {
 		return "", fmt.Errorf("failed to decode PEM block from private key")
@@ -77,7 +83,7 @@ func (p *Processor) gscGetAccessToken(ctx context.Context, sa serviceAccountKey)
 	claims := jwt.MapClaims{
 		"iss":   sa.ClientEmail,
 		"sub":   sa.ClientEmail,
-		"scope": "https://www.googleapis.com/auth/webmasters.readonly",
+		"scope": scope,
 		"aud":   sa.TokenURI,
 		"iat":   now.Unix(),
 		"exp":   now.Add(time.Hour).Unix(),
