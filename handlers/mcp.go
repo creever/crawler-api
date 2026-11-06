@@ -245,6 +245,16 @@ func (h *MCPHandler) toolGSCQuery(ctx context.Context, args map[string]interface
 	if errMsg != "" {
 		return nil, errMsg
 	}
+	// Distinguish "not configured" from "configured but no data yet" so the
+	// calling model does not misreport the setup state.
+	var project models.Project
+	if err := h.db.Collection("projects").FindOne(ctx, bson.M{"_id": oid}).Decode(&project); err != nil {
+		return nil, "project not found"
+	}
+	if project.GSCPropertyURL == "" || project.GSCServiceAccountJSON == "" {
+		return nil, "project has no GSC configuration: set gsc_property_url and gsc_service_account_json on the project"
+	}
+
 	days := argInt(args, "days", 28)
 	limit := argInt(args, "limit", 50)
 	since := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
@@ -271,6 +281,18 @@ func (h *MCPHandler) toolGSCQuery(ctx context.Context, args map[string]interface
 	var rows []bson.M
 	if err = cursor.All(ctx, &rows); err != nil {
 		return nil, err.Error()
+	}
+	if len(rows) == 0 {
+		var state struct {
+			LastError string    `bson:"last_error"`
+			LastRunAt time.Time `bson:"last_run_at"`
+		}
+		_ = h.db.Collection("gsc_sync_state").FindOne(ctx, bson.M{"project_id": oid}).Decode(&state)
+		msg := "GSC is configured but no synced rows found for this period — the daily sync may still be running or has not completed yet (check POST /projects/{id}/gsc/sync and GET /projects/{id}/gsc/status)"
+		if state.LastError != "" {
+			msg = "GSC sync last failed: " + state.LastError
+		}
+		return gin.H{"days": days, "rows": rows, "note": msg}, ""
 	}
 	return gin.H{"days": days, "rows": rows}, ""
 }
