@@ -25,8 +25,11 @@ type Opportunity struct {
 	Type      OpportunityType `bson:"type"        json:"type"`
 	Query     string          `bson:"query"         json:"query"`
 	Page      string          `bson:"page"          json:"page"`
-	Score     float64         `bson:"score"         json:"score"`
-	Rank      int             `bson:"rank"          json:"rank"`
+	// Pages lists every page competing for the query, strongest first
+	// (cannibalization only). Page is then the first entry.
+	Pages []string `bson:"pages,omitempty" json:"pages,omitempty"`
+	Score float64  `bson:"score"         json:"score"`
+	Rank  int      `bson:"rank"          json:"rank"`
 	// Metrics carries the raw numbers behind the score (impressions, clicks,
 	// ctr, position, prev_clicks, pages, ...).
 	Metrics map[string]float64 `bson:"metrics"   json:"metrics"`

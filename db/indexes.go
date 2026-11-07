@@ -114,6 +114,64 @@ func EnsureIndexes(database *mongo.Database, logger *zap.Logger) {
 		Options: options.Index().SetName("suggestions_project_status"),
 	})
 
+	// suggestions: pending lookups per page (analysis skip rules)
+	create("suggestions", mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "project_id", Value: 1},
+			{Key: "page", Value: 1},
+			{Key: "status", Value: 1},
+		},
+		Options: options.Index().SetName("suggestions_project_page_status"),
+	})
+
+	// page_analyses: per-project listing and latest analysis of a page
+	create("page_analyses", mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "project_id", Value: 1},
+			{Key: "created_at", Value: -1},
+		},
+		Options: options.Index().SetName("page_analyses_project_date"),
+	})
+	create("page_analyses", mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "project_id", Value: 1},
+			{Key: "page", Value: 1},
+			{Key: "created_at", Value: -1},
+		},
+		Options: options.Index().SetName("page_analyses_project_page_date"),
+	})
+
+	// page_snapshots: one snapshot per project × URL
+	create("page_snapshots", mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "project_id", Value: 1},
+			{Key: "url", Value: 1},
+		},
+		Options: options.Index().SetUnique(true).SetName("page_snapshots_project_url_unique"),
+	})
+
+	// page_snapshots: expire stale snapshots
+	create("page_snapshots", mongo.IndexModel{
+		Keys:    bson.D{{Key: "expires_at", Value: 1}},
+		Options: options.Index().SetExpireAfterSeconds(0).SetName("page_snapshots_ttl"),
+	})
+
+	// suggestion_runs: one run marker per project
+	create("suggestion_runs", mongo.IndexModel{
+		Keys:    bson.D{{Key: "project_id", Value: 1}},
+		Options: options.Index().SetUnique(true).SetName("suggestion_runs_project_unique"),
+	})
+
+	// applied_changes: recent changes per page (analysis skip rules)
+	create("applied_changes", mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "project_id", Value: 1},
+			{Key: "page", Value: 1},
+			{Key: "applied_at", Value: -1},
+		},
+		Options: options.Index().SetName("applied_changes_project_page_date"),
+	})
+
 	// applied_changes: per-project impact listing
 	create("applied_changes", mongo.IndexModel{
 		Keys: bson.D{

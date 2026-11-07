@@ -72,6 +72,10 @@ func (h *ApplyHandler) Apply(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "only approved or edited suggestions can be applied (current status: " + string(sug.Status) + ")"})
 		return
 	}
+	if !models.IsApplyableKind(sug.Kind) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "suggestion kind " + sug.Kind + " is a manual task and cannot be applied through an adapter"})
+		return
+	}
 	if project.AdapterType == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "project has no adapter_type configured"})
 		return

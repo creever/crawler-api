@@ -55,10 +55,12 @@ func checkAndScheduleSuggestionRuns(db *mongo.Database, asynqClient *asynq.Clien
 			continue
 		}
 
-		// Skip if suggestions were already generated today.
-		count, countErr := db.Collection("suggestions").CountDocuments(ctx, bson.M{
+		// Skip if a run already started today. Counting created suggestions
+		// would miss runs that had nothing to store, and those would then be
+		// re-enqueued every minute.
+		count, countErr := db.Collection("suggestion_runs").CountDocuments(ctx, bson.M{
 			"project_id": g.ID,
-			"created_at": bson.M{"$gte": todayStart},
+			"started_at": bson.M{"$gte": todayStart},
 		})
 		if countErr == nil && count > 0 {
 			continue

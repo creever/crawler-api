@@ -182,6 +182,7 @@ func (p *Processor) HandleComputeOpportunities(ctx context.Context, t *asynq.Tas
 		opps = append(opps, models.Opportunity{
 			ID: bson.NewObjectID(), ProjectID: projectOID,
 			Type: models.OppCannibalization, Query: r.ID,
+			Page: r.Pages[0], Pages: r.Pages,
 			Score: r.Impressions,
 			Metrics: map[string]float64{
 				"impressions": r.Impressions,
@@ -286,7 +287,7 @@ func (p *Processor) aggPage(ctx context.Context, projectOID bson.ObjectID, start
 }
 
 // aggCannibalization groups gsc_rows by query over [start, end] and collects
-// the distinct pages that received impressions.
+// the distinct pages that received impressions, strongest page first.
 func (p *Processor) aggCannibalization(ctx context.Context, projectOID bson.ObjectID, start, end time.Time) ([]oppQuery, error) {
 	pipeline := mongo.Pipeline{
 		{{Key: "$match", Value: bson.D{
@@ -298,9 +299,15 @@ func (p *Processor) aggCannibalization(ctx context.Context, projectOID bson.Obje
 			{Key: "impressions", Value: bson.D{{Key: "$gt", Value: 0}}},
 		}}},
 		{{Key: "$group", Value: bson.D{
-			{Key: "_id", Value: "$query"},
+			{Key: "_id", Value: bson.D{{Key: "query", Value: "$query"}, {Key: "page", Value: "$page"}}},
+			{Key: "clicks", Value: bson.D{{Key: "$sum", Value: "$clicks"}}},
 			{Key: "impressions", Value: bson.D{{Key: "$sum", Value: "$impressions"}}},
-			{Key: "pages", Value: bson.D{{Key: "$addToSet", Value: "$page"}}},
+		}}},
+		{{Key: "$sort", Value: bson.D{{Key: "clicks", Value: -1}, {Key: "impressions", Value: -1}}}},
+		{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: "$_id.query"},
+			{Key: "impressions", Value: bson.D{{Key: "$sum", Value: "$impressions"}}},
+			{Key: "pages", Value: bson.D{{Key: "$push", Value: "$_id.page"}}},
 		}}},
 		{{Key: "$match", Value: bson.D{
 			{Key: "impressions", Value: bson.D{{Key: "$gte", Value: oppMinImpressions * 2}}},
