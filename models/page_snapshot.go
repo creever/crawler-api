@@ -61,6 +61,11 @@ type PageSnapshot struct {
 	Canonical       string        `bson:"canonical"        json:"canonical"`
 	Robots          string        `bson:"robots"           json:"robots"`
 	Hreflang        []string      `bson:"hreflang"         json:"hreflang"`
+	// Lang is the page's <html lang> value.
+	Lang string `bson:"lang" json:"lang"`
+	// Availability comes from the page's structured data: in_stock,
+	// out_of_stock, or empty when the page does not state it.
+	Availability string `bson:"availability" json:"availability"`
 	OGTitle         string        `bson:"og_title"         json:"og_title"`
 	OGDescription   string        `bson:"og_description"   json:"og_description"`
 	SchemaTypes     []string      `bson:"schema_types"     json:"schema_types"`

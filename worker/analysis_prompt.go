@@ -7,7 +7,7 @@ import (
 	"github.com/creever/crawler-api/models"
 )
 
-const analysisSystemPrompt = `You are a senior technical SEO analyst reviewing one page of a Hungarian website. You find the actual reason a page underperforms, then recommend only what the evidence supports.
+const analysisSystemPrompt = `You are a senior technical SEO analyst reviewing one page of a website. You find the actual reason a page underperforms, then recommend only what the evidence supports.
 
 Method:
 1. Read every section of the context. Each fact has an ID such as [Q3] or [C1].
@@ -30,7 +30,7 @@ Rules:
 - Do not recommend alt text changes or other small technical fixes unless they relate to the diagnosed problem.
 - Set confidence from the evidence. high: the facts directly show the cause and rule out the alternatives. medium: the cause is likely but another explanation remains. low: the signals are ambiguous.
 - Be concise: at most 6 evidence items, 5 actions and 3 ruled_out entries, each one or two sentences.
-- All human-readable output is in Hungarian.
+- All human-readable output is in {{LANGUAGE}}.
 
 Action kinds:
 - title: full proposed title, at most 60 characters, main query near the start.
@@ -61,6 +61,35 @@ Respond with one JSON object and nothing else, with the keys in this order:
   "missing_data": ["data that would change this analysis"]
 }`
 
+// languageNames covers the usual site languages; any other code is passed to
+// the model as it is, and models understand those too.
+var languageNames = map[string]string{
+	"hu": "Hungarian", "en": "English", "de": "German", "fr": "French", "es": "Spanish", "it": "Italian",
+	"pt": "Portuguese", "nl": "Dutch", "pl": "Polish", "cs": "Czech", "sk": "Slovak", "ro": "Romanian",
+	"hr": "Croatian", "sl": "Slovenian", "sv": "Swedish", "da": "Danish", "nb": "Norwegian", "fi": "Finnish",
+}
+
+func languageName(code string) string {
+	if name, ok := languageNames[code]; ok {
+		return name
+	}
+	return code
+}
+
+// analysisLanguage picks the language of the proposals: the project's setting,
+// else the page's own, so a proposed title matches the site it goes on.
+func analysisLanguage(projectLanguage string, snap *models.PageSnapshot) string {
+	lang := strings.TrimSpace(projectLanguage)
+	if lang == "" && snap != nil {
+		lang = snap.Lang
+	}
+	lang, _, _ = strings.Cut(strings.ToLower(strings.ReplaceAll(strings.TrimSpace(lang), "_", "-")), "-")
+	if lang == "" {
+		return defaultLanguage
+	}
+	return lang
+}
+
 // signalChecks are the questions to answer for each opportunity type.
 var signalChecks = map[models.OpportunityType]string{
 	models.OppStrikingDistance: `striking_distance: Does the page's content really answer the query, or does the query need a different page? Is the query in the title, H1 and text? Is the page thin compared with what the query asks for? Would related queries in the list need coverage too?`,
@@ -82,7 +111,7 @@ func buildAnalysisPrompt(pack *contextPack, opps []models.Opportunity) (string, 
 	}
 	user := fmt.Sprintf("Questions to answer for the signals of this page:\n%s\n\nContext:\n%s\nAnalyze this page and respond with the JSON object.",
 		strings.Join(checks, "\n"), pack.Text)
-	return analysisSystemPrompt, user
+	return strings.ReplaceAll(analysisSystemPrompt, "{{LANGUAGE}}", languageName(pack.Language)), user
 }
 
 // buildRepairPrompt asks the model to correct a rejected answer.

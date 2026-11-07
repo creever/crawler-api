@@ -514,3 +514,60 @@ func TestApplyableKinds(t *testing.T) {
 		}
 	}
 }
+
+func TestPromptUsesTheSiteLanguage(t *testing.T) {
+	system, _ := buildAnalysisPrompt(&contextPack{Language: "de"}, nil)
+	if !strings.Contains(system, "output is in German") || strings.Contains(system, "Hungarian") {
+		t.Fatalf("prompt does not name the site's language")
+	}
+	cases := []struct {
+		project string
+		page    string
+		want    string
+	}{{"hu", "en-GB", "hu"}, {"", "en-GB", "en"}, {"", "pt_BR", "pt"}, {"", "", "en"}}
+	for _, c := range cases {
+		if got := analysisLanguage(c.project, &models.PageSnapshot{Lang: c.page}); got != c.want {
+			t.Errorf("analysisLanguage(%q, %q) = %q, want %q", c.project, c.page, got, c.want)
+		}
+	}
+}
+
+func TestPricesInOtherCurrencies(t *testing.T) {
+	cases := []struct {
+		text     string
+		value    float64
+		currency string
+	}{
+		{"36.999 Ft", 36999, "FT"},
+		{"1 299 HUF", 1299, "HUF"},
+		{"€12,99", 12, "€"},
+		{"12,99 € kedvezmény", 12, "€"},
+		{"$1,299.99", 1299, "$"},
+		{"£45", 45, "£"},
+		{"1.299,50 zł", 1299, "ZŁ"},
+	}
+	for _, c := range cases {
+		v, cur, ok := cardPrice(c.text)
+		if !ok || v != c.value || cur != c.currency {
+			t.Errorf("cardPrice(%q) = %v %q %v, want %v %q", c.text, v, cur, ok, c.value, c.currency)
+		}
+	}
+	if _, _, ok := cardPrice("12 kronor"); ok {
+		t.Error("a word must not read as a currency")
+	}
+}
+
+func TestStructuredAvailability(t *testing.T) {
+	page := `<html lang="en-GB"><head><script type="application/ld+json">{"@type":"Product","offers":{"@type":"Offer","availability":"https://schema.org/OutOfStock"}}</script></head><body><h1>Red shoe</h1><p>A red shoe for every day of the week and for many other occasions, made from soft leather that lasts.</p></body></html>`
+	snap, err := extractSnapshot("https://x.example/red-shoe", 200, page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Lang != "en-GB" || snap.Availability != "out_of_stock" || !isUnavailablePage(snap) {
+		t.Fatalf("lang %q, availability %q, unavailable %v", snap.Lang, snap.Availability, isUnavailablePage(snap))
+	}
+	mergeAvailability(snap, []string{"InStock"})
+	if snap.Availability != "in_stock" {
+		t.Fatal("one purchasable offer must win")
+	}
+}

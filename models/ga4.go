@@ -15,7 +15,7 @@ type GA4Row struct {
 	Date        string        `bson:"date"         json:"date"` // YYYYMMDD, as the GA4 API returns it
 	Sessions    int           `bson:"sessions"     json:"sessions"`
 	Conversions float64       `bson:"conversions"  json:"conversions"`
-	Revenue     float64       `bson:"revenue"      json:"revenue"` // HUF
+	Revenue     float64       `bson:"revenue"      json:"revenue"` // in the GA4 property's currency
 	SyncedAt    time.Time     `bson:"synced_at"    json:"synced_at"`
 }
 

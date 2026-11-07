@@ -75,6 +75,8 @@ type relatedPage struct {
 // contextInput is everything known about a page before the prompt is built.
 type contextInput struct {
 	Brand         string
+	Language      string
+	Currency      string
 	Page          string
 	Opportunities []models.Opportunity
 	Snapshot      *models.PageSnapshot
@@ -90,6 +92,7 @@ type contextInput struct {
 // must cite, so citations can be verified in code.
 type contextPack struct {
 	Text     string
+	Language string
 	Facts    map[string]string
 	Coverage models.AnalysisCoverage
 
@@ -121,7 +124,7 @@ func clip(s string, n int) (string, bool) {
 // buildContextPack renders the input in a fixed order within fixed budgets.
 // Whatever a budget cuts off is recorded in Coverage.Truncated.
 func buildContextPack(in contextInput) *contextPack {
-	c := &contextPack{Facts: make(map[string]string), counters: make(map[string]int)}
+	c := &contextPack{Language: in.Language, Facts: make(map[string]string), counters: make(map[string]int)}
 	snap := in.Snapshot
 	c.Coverage.ContentWords = snap.ContentWordCount
 	c.Coverage.SnapshotAt = snap.FetchedAt
@@ -335,7 +338,8 @@ func writeSearchData(c *contextPack, in contextInput) {
 	if in.GA4 == nil {
 		c.sb.WriteString("No GA4 data.\n")
 	} else {
-		c.fact("G", "Sessions %.0f, key events %.0f, revenue %.0f HUF", in.GA4.Sessions, in.GA4.Conversions, in.GA4.Revenue)
+		c.fact("G", "Sessions %.0f, key events %.0f, revenue %s", in.GA4.Sessions, in.GA4.Conversions,
+			strings.TrimSpace(fmt.Sprintf("%.0f %s", in.GA4.Revenue, in.Currency)))
 		c.sb.WriteString("Key events and revenue per landing page can be misattributed (for example to the cart). Use sessions as a measure of traffic, and never conclude from these figures that a page does or does not sell.\n")
 	}
 }

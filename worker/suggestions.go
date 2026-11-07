@@ -19,8 +19,8 @@ import (
 const (
 	// suggestDefaultLimit caps how many pages get analyzed per run.
 	suggestDefaultLimit = 10
-	// suggestLanguage is the language AI suggestions are generated in.
-	suggestLanguage = "hu"
+	// defaultLanguage is used when neither the project nor the page states one.
+	defaultLanguage = "en"
 	// analysisMaxTokens leaves room for a diagnosis plus a full category text.
 	analysisMaxTokens = 4000
 	// analysisRenderBudget caps Chrome renders per run on the small crawler box.
@@ -97,26 +97,26 @@ func outcomeWith(status models.AnalysisStatus, reason string) *analysisOutcome {
 // no LLM; a page with no readable content must not reach the LLM.
 func gateAnalysis(page string, snap *models.PageSnapshot, snapErr error) *analysisOutcome {
 	if page == "" {
-		return outcomeWith(models.AnalysisStatusFailed, "Az opportunity nem tartalmaz céloldalt.")
+		return outcomeWith(models.AnalysisStatusFailed, "The opportunity has no target page.")
 	}
 	if snapErr != nil {
-		return outcomeWith(models.AnalysisStatusFailed, "Az oldal nem olvasható: "+snapErr.Error())
+		return outcomeWith(models.AnalysisStatusFailed, "The page could not be read: "+snapErr.Error())
 	}
 	if snap.StatusCode >= 400 {
-		o := technicalOutcome(snap, fmt.Sprintf("Az oldal HTTP %d hibával válaszol.", snap.StatusCode),
-			"Az oldal hibát ad vissza, ezért a keresőből kieshet, a tartalma pedig nem elemezhető.",
-			models.SuggestionKindTechnical, "Állítsd helyre az oldalt, vagy irányítsd át 301-gyel a legközelebbi releváns oldalra.")
+		o := technicalOutcome(snap, fmt.Sprintf("The page responds with HTTP %d.", snap.StatusCode),
+			"The page returns an error, so it can drop out of search and its content cannot be analyzed.",
+			models.SuggestionKindTechnical, "Restore the page, or redirect it with a 301 to the closest relevant page.")
 		return &o
 	}
 	if strings.Contains(strings.ToLower(snap.Robots), "noindex") {
-		o := technicalOutcome(snap, "Az oldal noindex jelölést kapott.",
-			"A noindex miatt a Google nem tartja indexben az oldalt, így minden más javítás hatástalan.",
-			models.SuggestionKindNoindex, "Ellenőrizd, hogy a noindex szándékos-e. Ha nem, távolítsd el a meta robots jelölést.")
+		o := technicalOutcome(snap, "The page is marked noindex.",
+			"With noindex, Google keeps the page out of its index, so no other fix can have an effect.",
+			models.SuggestionKindNoindex, "Check whether the noindex is intentional. If it is not, remove the meta robots tag.")
 		return &o
 	}
 	if snap.LowConfidence {
 		return outcomeWith(models.AnalysisStatusInsufficientContext,
-			fmt.Sprintf("Az oldalon csak %d tartalmi szó ismerhető fel, ez nem elég megalapozott elemzéshez. Ellenőrizd a renderelést.", snap.ContentWordCount))
+			fmt.Sprintf("Only %d content words were recognized on the page, too few for a sound analysis. Check how the page renders.", snap.ContentWordCount))
 	}
 	return nil
 }
@@ -150,7 +150,7 @@ func runLLMAnalysis(ctx context.Context, ai aiCallFn, pack *contextPack, opps []
 	raw, err := ai(ctx, system, user, analysisMaxTokens)
 	if err != nil {
 		outcome.Analysis.Status = models.AnalysisStatusFailed
-		outcome.Analysis.StatusReason = "Az AI-hívás sikertelen: " + err.Error()
+		outcome.Analysis.StatusReason = "The AI call failed: " + err.Error()
 		return outcome
 	}
 	outcome.Analysis.RawResponse = raw
@@ -179,12 +179,12 @@ func runLLMAnalysis(ctx context.Context, ai aiCallFn, pack *contextPack, opps []
 
 	if resp == nil {
 		outcome.Analysis.Status = models.AnalysisStatusFailed
-		outcome.Analysis.StatusReason = "A modell válasza nem értelmezhető: " + parseErr.Error()
+		outcome.Analysis.StatusReason = "The model's answer could not be parsed: " + parseErr.Error()
 		return outcome
 	}
 	if strings.TrimSpace(resp.Diagnosis.PrimaryIssue) == "" && len(checked.Actions) == 0 && resp.NoActionReason == "" {
 		outcome.Analysis.Status = models.AnalysisStatusFailed
-		outcome.Analysis.StatusReason = "A modell nem adott diagnózist."
+		outcome.Analysis.StatusReason = "The model gave no diagnosis."
 		outcome.Analysis.ValidationWarnings = problems
 		return outcome
 	}
@@ -266,7 +266,7 @@ func buildSuggestions(a *models.PageAnalysis, actions []analysisAction, target a
 		out = append(out, models.Suggestion{
 			ID: bson.NewObjectID(), ProjectID: a.ProjectID, OpportunityID: oppID, AnalysisID: &a.ID,
 			Kind: act.Kind, Target: strings.TrimSpace(act.Target), Priority: priority, Effort: normalizeEffort(act.Effort),
-			EvidenceRefs: act.EvidenceRefs, Page: target.Page, Query: query, Language: suggestLanguage,
+			EvidenceRefs: act.EvidenceRefs, Page: target.Page, Query: query, Language: a.Language,
 			CurrentValue: currentValue(act.Kind, snap), ProposedValue: act.Proposed,
 			Status: models.SuggestionStatusPending, Reason: strings.TrimSpace(act.Rationale),
 			CreatedAt: now, UpdatedAt: now,
@@ -287,20 +287,22 @@ func (p *Processor) analyzeTarget(ctx context.Context, project *models.Project, 
 		}
 	}
 	if gated := gateAnalysis(target.Page, snap, snapErr); gated != nil {
+		gated.Analysis.Language = analysisLanguage(project.Language, snap)
 		return *gated, snap, nil
 	}
 
-	input := contextInput{Brand: project.Name, Page: target.Page, Opportunities: target.Opps, Snapshot: snap}
+	language := analysisLanguage(project.Language, snap)
+	input := contextInput{Brand: project.Name, Language: language, Currency: project.Currency, Page: target.Page, Opportunities: target.Opps, Snapshot: snap}
 	var missing []string
 	queries, devices, competing, err := p.pageSearchData(ctx, project.ID, target.Page)
 	if err != nil {
 		p.logger.Warn("analysis: search data unavailable", zap.String("page", target.Page), zap.Error(err))
-		missing = append(missing, "Search Console adatok")
+		missing = append(missing, "Search Console data")
 	}
 	input.Queries, input.Devices = queries, devices
 	if input.GA4, err = p.pageGA4(ctx, project.ID, target.Page); err != nil {
 		p.logger.Warn("analysis: GA4 data unavailable", zap.String("page", target.Page), zap.Error(err))
-		missing = append(missing, "GA4 adatok")
+		missing = append(missing, "GA4 data")
 	}
 
 	for _, rel := range pickRelatedPages(target.Page, target.Opps, competing) {
@@ -316,6 +318,7 @@ func (p *Processor) analyzeTarget(ctx context.Context, project *models.Project, 
 	pack := buildContextPack(input)
 	outcome := runLLMAnalysis(ctx, ai, pack, target.Opps, snap)
 	outcome.Analysis.Coverage = pack.Coverage
+	outcome.Analysis.Language = language
 	outcome.Analysis.MissingData = append(outcome.Analysis.MissingData, missing...)
 	return outcome, snap, nil
 }

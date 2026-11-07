@@ -44,6 +44,7 @@ type PageAnalysis struct {
 	ID             bson.ObjectID     `bson:"_id,omitempty"   json:"id,omitempty"`
 	ProjectID      bson.ObjectID     `bson:"project_id"      json:"project_id"`
 	Page           string            `bson:"page"            json:"page"`
+	Language       string            `bson:"language"        json:"language"`
 	OpportunityIDs []bson.ObjectID   `bson:"opportunity_ids" json:"opportunity_ids"`
 	Signals        []OpportunityType `bson:"signals"         json:"signals"`
 	Status         AnalysisStatus    `bson:"status"          json:"status"`

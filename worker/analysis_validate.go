@@ -239,13 +239,19 @@ func validateAction(a *analysisAction, pack *contextPack, snap *models.PageSnaps
 	return ""
 }
 
-// Unavailable-product wording, as shown on the page.
-var reUnavailable = regexp.MustCompile(`(?i)jelenleg nem elérhető|nincs készleten|elfogyott|out of stock|currently unavailable`)
+// Unavailable-product wording for sites without structured availability data.
+var reUnavailable = regexp.MustCompile(`(?i)jelenleg nem elérhető|nincs készleten|elfogyott|` +
+	`out of stock|currently unavailable|sold out|no longer available|` +
+	`ausverkauft|nicht verfügbar|nicht auf lager|rupture de stock|actuellement indisponible|` +
+	`agotado|sin existencias|esaurito|non disponibile|niedostępny|wyprzedany|vyprodáno|nedostupné|stoc epuizat`)
 
-// isUnavailablePage reports whether the page's own text says the product can't
-// be bought. Listing cards are not part of Prose, so a sold-out item on a
-// category page doesn't count.
+// isUnavailablePage reports whether the page says the product can't be bought,
+// in its structured data or in its own text. Listing cards are not part of
+// Prose, so a sold-out item on a category page doesn't count.
 func isUnavailablePage(snap *models.PageSnapshot) bool {
+	if snap.Availability == "out_of_stock" && !isListingPage(snap) {
+		return true
+	}
 	return reUnavailable.MatchString(strings.Join(snap.Prose, " "))
 }
 
@@ -307,8 +313,8 @@ func hostOf(raw string) string {
 }
 
 var (
-	reTooLong      = regexp.MustCompile(`(?i)túl hossz|too long`)
-	reFreeShipping = regexp.MustCompile(`(?i)ingyenes\s+(ki)?szállítás|free\s+shipping`)
+	reTooLong      = regexp.MustCompile(`(?i)túl hossz|too long|zu lang|trop long|demasiado larg|troppo lung|za długi|příliš dlouh`)
+	reFreeShipping = regexp.MustCompile(`(?i)ingyenes\s+(ki)?szállítás|free\s+(shipping|delivery)|kostenlose[rn]?\s+versand|livraison\s+gratuite|envío\s+gratis|spedizione\s+gratuita|darmowa\s+dostawa|doprava\s+zdarma|transport\s+gratuit`)
 	reNumber       = regexp.MustCompile(`\d+(?:[ .\x{a0}]\d{3})*`)
 )
 
@@ -356,7 +362,7 @@ var (
 
 // unsupportedNames returns capitalized words of text, other than sentence
 // openers, that have no match in the context. Those are brand or product names
-// the model brought in from outside. Hungarian suffixes are tolerated by
+// the model brought in from outside. Inflected forms are tolerated by
 // matching on the stem: "Skecherstől" matches "Skechers".
 func unsupportedNames(text, corpus string) []string {
 	var names []string

@@ -29,7 +29,12 @@ type Project struct {
 	AdapterAPIKey   string `bson:"adapter_api_key"  json:"adapter_api_key"`
 	// GA4PropertyID is the numeric GA4 property ID (e.g. "123456789"); uses the
 	// same service account as GSC with the analytics.readonly scope.
-	GA4PropertyID string    `bson:"ga4_property_id"  json:"ga4_property_id"`
+	GA4PropertyID string `bson:"ga4_property_id"  json:"ga4_property_id"`
+	// Language is the site's language code (e.g. "en"). Empty means it is read
+	// from each page's <html lang>.
+	Language string `bson:"language"  json:"language"`
+	// Currency labels GA4 revenue (e.g. "EUR"). Empty leaves it unlabelled.
+	Currency  string    `bson:"currency"  json:"currency"`
 	CreatedAt     time.Time `bson:"created_at"       json:"created_at"`
 	UpdatedAt     time.Time `bson:"updated_at"               json:"updated_at"`
 }
@@ -50,6 +55,8 @@ type ProjectUpdateInput struct {
 	AdapterEndpoint       *string   `bson:"adapter_endpoint,omitempty" json:"adapter_endpoint"`
 	AdapterAPIKey         *string   `bson:"adapter_api_key,omitempty"  json:"adapter_api_key"`
 	GA4PropertyID         *string   `bson:"ga4_property_id,omitempty"  json:"ga4_property_id"`
+	Language              *string   `bson:"language,omitempty"         json:"language"`
+	Currency              *string   `bson:"currency,omitempty"         json:"currency"`
 	UpdatedAt             time.Time `bson:"updated_at"              json:"-"`
 }
 

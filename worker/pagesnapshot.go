@@ -30,7 +30,7 @@ import (
 const (
 	snapshotTTL = 24 * time.Hour
 	// snapshotVersion invalidates cached snapshots when extraction changes.
-	snapshotVersion = 2
+	snapshotVersion = 3
 
 	// navLinkDensity marks a block as navigation: nearly all of its text is
 	// link text. Measured on cipomarket.hu: menu 0.92, product list 0.23,
@@ -56,11 +56,18 @@ const (
 	minContentWords = 30
 )
 
+const (
+	priceAmount   = `(\d{1,3}(?:[ .,\x{a0}]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)`
+	priceCurrency = `(Ft|HUF|€|EUR|\$|USD|£|GBP|zł|PLN|Kč|CZK|lei|RON|kr|SEK|NOK|DKK|CHF)`
+)
+
 var (
 	reFilterRegion = regexp.MustCompile(`(?i)filter|facet|sidebar|szuro|szűrő`)
 	reCategoryText = regexp.MustCompile(`(?i)categor|kategor`)
 	reTextRegion   = regexp.MustCompile(`(?i)description|leiras|leírás|seo-text`)
-	rePrice        = regexp.MustCompile(`(?i)(\d{1,3}(?:[ .\x{a0}]\d{3})+|\d+)(?:,\d{1,2})?\s*(Ft|HUF|€|EUR)\b`)
+	// rePrice finds an amount with its currency on either side. The currency
+	// must not run on into a word, so "12 kronor" or "5 kraj" is not "12 kr".
+	rePrice = regexp.MustCompile(`(?i)(?:` + priceAmount + `\s*` + priceCurrency + `|` + priceCurrency + `\s*` + priceAmount + `)(?:[^\p{L}\p{N}]|$)`)
 	reSpaces       = regexp.MustCompile(`\s+`)
 )
 
@@ -409,6 +416,10 @@ func extractHead(doc *html.Node, snap *models.PageSnapshot) {
 	walk = func(n *html.Node) {
 		if n.Type == html.ElementNode {
 			switch n.DataAtom {
+			case atom.Html:
+				if lang, ok := attr(n, "lang"); ok && snap.Lang == "" {
+					snap.Lang = strings.TrimSpace(lang)
+				}
 			case atom.Title:
 				if snap.Title == "" {
 					snap.Title = cleanText(rawText(n))
@@ -443,7 +454,9 @@ func extractHead(doc *html.Node, snap *models.PageSnapshot) {
 				}
 			case atom.Script:
 				if t, _ := attr(n, "type"); strings.EqualFold(t, "application/ld+json") {
-					snap.SchemaTypes = appendUnique(snap.SchemaTypes, jsonLDTypes(rawText(n))...)
+					raw := rawText(n)
+					snap.SchemaTypes = appendUnique(snap.SchemaTypes, jsonLDTypes(raw)...)
+					mergeAvailability(snap, jsonLDAvailability(raw))
 				}
 			}
 		}
@@ -496,6 +509,49 @@ func jsonLDTypes(raw string) []string {
 	}
 	walk(v)
 	return types
+}
+
+// jsonLDAvailability collects every schema.org availability value of a JSON-LD
+// block, without the https://schema.org/ prefix.
+func jsonLDAvailability(raw string) []string {
+	var v interface{}
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		return nil
+	}
+	var values []string
+	var walk func(interface{})
+	walk = func(x interface{}) {
+		switch t := x.(type) {
+		case []interface{}:
+			for _, e := range t {
+				walk(e)
+			}
+		case map[string]interface{}:
+			if s, ok := t["availability"].(string); ok {
+				values = append(values, s[strings.LastIndexByte(s, '/')+1:])
+			}
+			for _, e := range t {
+				walk(e)
+			}
+		}
+	}
+	walk(v)
+	return values
+}
+
+// mergeAvailability sets the page's availability: one purchasable offer is
+// enough for in_stock.
+func mergeAvailability(snap *models.PageSnapshot, values []string) {
+	for _, v := range values {
+		switch strings.ToLower(v) {
+		case "instock", "instoreonly", "onlineonly", "limitedavailability", "preorder", "presale", "backorder":
+			snap.Availability = "in_stock"
+		case "outofstock", "soldout", "discontinued":
+			if snap.Availability == "" {
+				snap.Availability = "out_of_stock"
+			}
+		}
+	}
 }
 
 func appendUnique(list []string, items ...string) []string {
@@ -671,19 +727,31 @@ func brandFromName(name string) string {
 // cardPrice returns the lowest price of a card: the current one when a card
 // also shows the original price.
 func cardPrice(text string) (float64, string, bool) {
-	matches := rePrice.FindAllStringSubmatch(text, -1)
 	lowest, currency := 0.0, ""
-	for _, m := range matches {
-		digits := strings.NewReplacer(" ", "", ".", "", " ", "").Replace(m[1])
-		v, err := strconv.ParseFloat(digits, 64)
-		if err != nil || v <= 0 {
-			continue
+	for _, m := range rePrice.FindAllStringSubmatch(text, -1) {
+		amount, cur := m[1], m[2]
+		if amount == "" {
+			cur, amount = m[3], m[4]
 		}
-		if lowest == 0 || v < lowest {
-			lowest, currency = v, strings.ToUpper(m[2])
+		v := parseAmount(amount)
+		if v > 0 && (lowest == 0 || v < lowest) {
+			lowest, currency = v, strings.ToUpper(cur)
 		}
 	}
 	return lowest, currency, lowest > 0
+}
+
+var reAmountDecimals = regexp.MustCompile(`[.,]\d{1,2}$`)
+
+// parseAmount reads "1 299", "1.299,50" and "1,299.50" alike. Decimals are
+// dropped: prices only serve as a range for the page.
+func parseAmount(s string) float64 {
+	digits := strings.NewReplacer(" ", "", ".", "", ",", "", "\u00a0", "").Replace(reAmountDecimals.ReplaceAllString(s, ""))
+	v, err := strconv.ParseFloat(digits, 64)
+	if err != nil {
+		return 0
+	}
+	return v
 }
 
 func topKeys(counts map[string]int, n int) []string {
@@ -712,7 +780,7 @@ func paginationPages(body *html.Node) int {
 		if n.DataAtom == atom.A {
 			if href, ok := attr(n, "href"); ok {
 				if u, err := url.Parse(href); err == nil {
-					for _, key := range []string{"p", "page", "oldal"} {
+					for _, key := range []string{"p", "page", "pg", "paged", "oldal", "seite", "pagina", "strona"} {
 						if v, convErr := strconv.Atoi(u.Query().Get(key)); convErr == nil && v > highest && v < 10000 {
 							highest = v
 						}
