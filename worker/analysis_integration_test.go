@@ -137,7 +137,7 @@ func TestIntegrationBulkRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err = database.Collection("ga4_rows").InsertOne(ctx, models.GA4Row{
-		ID: bson.NewObjectID(), ProjectID: projectID, Page: "/noi/bokacsizma", Date: day.Format("2006-01-02"), Sessions: 50, Conversions: 2, Revenue: 40000,
+		ID: bson.NewObjectID(), ProjectID: projectID, Page: "/noi/bokacsizma", Date: day.Format(GA4DateLayout), Sessions: 50, Conversions: 2, Revenue: 40000,
 	}); err != nil {
 		t.Fatal(err)
 	}

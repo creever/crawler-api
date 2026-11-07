@@ -18,6 +18,9 @@ import (
 	"github.com/creever/crawler-api/models"
 )
 
+// GA4DateLayout is the format of the GA4 date dimension, stored as received.
+const GA4DateLayout = "20060102"
+
 const (
 	// ga4DataLagDays: GA4 standard reports lag ~24-48h.
 	ga4DataLagDays = 2
@@ -145,7 +148,7 @@ func (p *Processor) HandleGA4Sync(ctx context.Context, t *asynq.Task) error {
 	return nil
 }
 
-// ga4Row is one runReport row: dimensions [date, pagePath].
+// ga4Row is one runReport row: dimensions [date, landingPage].
 type ga4Row struct {
 	Date        string
 	Page        string
@@ -159,10 +162,10 @@ type ga4Row struct {
 func (p *Processor) ga4RunReport(ctx context.Context, accessToken, propertyID, startDate, endDate string, offset int) ([]ga4Row, int, error) {
 	reqBody, _ := json.Marshal(map[string]interface{}{
 		"dateRanges": []map[string]string{{"startDate": startDate, "endDate": endDate}},
-		"dimensions": []map[string]string{{"name": "date"}, {"name": "pagePath"}},
+		"dimensions": []map[string]string{{"name": "date"}, {"name": "landingPage"}},
 		"metrics": []map[string]string{
 			{"name": "sessions"},
-			{"name": "conversions"},
+			{"name": "keyEvents"},
 			{"name": "totalRevenue"},
 		},
 		"limit":  ga4PageSize,

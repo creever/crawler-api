@@ -144,7 +144,7 @@ func (h *GA4Handler) Report(c *gin.Context) {
 	if d, convErr := strconv.Atoi(c.DefaultQuery("days", "28")); convErr == nil && d > 0 && d <= 400 {
 		days = d
 	}
-	since := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
+	since := time.Now().UTC().AddDate(0, 0, -days).Format(worker.GA4DateLayout)
 
 	pipeline := mongo.Pipeline{
 		{{Key: "$match", Value: bson.D{

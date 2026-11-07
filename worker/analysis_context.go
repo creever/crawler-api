@@ -467,7 +467,10 @@ func (p *Processor) pageGA4(ctx context.Context, projectOID bson.ObjectID, page 
 		{{Key: "$match", Value: bson.D{
 			{Key: "project_id", Value: projectOID},
 			{Key: "page", Value: bson.M{"$in": bson.A{path, path + "/"}}},
-			{Key: "date", Value: dateRange(curStart, end)},
+			{Key: "date", Value: bson.D{
+				{Key: "$gte", Value: curStart.Format(GA4DateLayout)},
+				{Key: "$lte", Value: end.Format(GA4DateLayout)},
+			}},
 		}}},
 		{{Key: "$group", Value: bson.D{
 			{Key: "_id", Value: nil},

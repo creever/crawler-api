@@ -12,7 +12,7 @@ type GA4Row struct {
 	ID          bson.ObjectID `bson:"_id,omitempty" json:"id,omitempty"`
 	ProjectID   bson.ObjectID `bson:"project_id"   json:"project_id"`
 	Page        string        `bson:"page"         json:"page"` // landing page path
-	Date        string        `bson:"date"         json:"date"` // YYYY-MM-DD (UTC)
+	Date        string        `bson:"date"         json:"date"` // YYYYMMDD, as the GA4 API returns it
 	Sessions    int           `bson:"sessions"     json:"sessions"`
 	Conversions float64       `bson:"conversions"  json:"conversions"`
 	Revenue     float64       `bson:"revenue"      json:"revenue"` // HUF
