@@ -18,6 +18,7 @@ const (
 	TypeGSCSync       = "gsc:sync"
 	TypeComputeOpps   = "opportunities:compute"
 	TypeGenSuggest    = "suggestions:generate"
+	TypeVerifyTask    = "tasks:verify"
 )
 
 // CrawlPayload is the JSON payload stored in every crawl task.
@@ -124,6 +125,11 @@ func NewComputeOppsTask(projectID string) (*asynq.Task, error) {
 		return nil, fmt.Errorf("marshal opportunities:compute payload: %w", err)
 	}
 	return asynq.NewTask(TypeComputeOpps, payload), nil
+}
+
+// VerifyTaskPayload is the JSON payload for a tasks:verify task.
+type VerifyTaskPayload struct {
+	TaskID string `json:"task_id"`
 }
 
 // GenSuggestPayload is the JSON payload for a suggestions:generate task.

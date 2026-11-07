@@ -10,8 +10,6 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
-	"github.com/creever/crawler-api/adapters"
-	"github.com/creever/crawler-api/middleware"
 	"github.com/creever/crawler-api/models"
 )
 
@@ -26,18 +24,19 @@ func NewApplyHandler(db *mongo.Database) *ApplyHandler {
 }
 
 // Apply godoc
-// @Summary      Push an approved suggestion to the site via its adapter
-// @Description  Only approved/edited suggestions can be applied. Captures a 28-day "before" GSC snapshot and logs the change for impact tracking.
+// @Summary      Mark a decided suggestion as Apply on site
+// @Description  Only sets the status: nothing reaches the site from here. A task can be created from the suggestion later.
 // @Tags         projects
 // @Produce      json
 // @Param        id   path  string  true  "Project ID"
 // @Param        sid  path  string  true  "Suggestion ID"
-// @Success      200  {object}  models.AppliedChange
+// @Success      200  {object}  models.Suggestion
 // @Router       /api/v1/projects/{id}/suggestions/{sid}/apply [post]
 func (h *ApplyHandler) Apply(c *gin.Context) {
-	id, err := bson.ObjectIDFromHex(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid project id"})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	id, ok := projectFromRequest(ctx, c, h.db)
+	if !ok {
 		return
 	}
 	sid, err := bson.ObjectIDFromHex(c.Param("sid"))
@@ -46,86 +45,21 @@ func (h *ApplyHandler) Apply(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-
-	var project models.Project
-	if err = h.db.Collection("projects").FindOne(ctx, gscProjectFilter(c, id)).Decode(&project); err != nil {
-		if err == mongo.ErrNoDocuments {
-			c.JSON(http.StatusNotFound, gin.H{"error": "project not found"})
-		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch project"})
-		}
-		return
-	}
-
 	var sug models.Suggestion
-	if err = h.db.Collection("suggestions").FindOne(ctx, bson.M{"_id": sid, "project_id": id}).Decode(&sug); err != nil {
-		if err == mongo.ErrNoDocuments {
-			c.JSON(http.StatusNotFound, gin.H{"error": "suggestion not found"})
-		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch suggestion"})
-		}
+	err = h.db.Collection("suggestions").FindOneAndUpdate(ctx,
+		bson.M{"_id": sid, "project_id": id, "status": bson.M{"$in": []models.SuggestionStatus{models.SuggestionStatusApproved, models.SuggestionStatusEdited}}},
+		bson.M{"$set": bson.M{"status": models.SuggestionStatusApplyOnSite, "updated_at": time.Now().UTC()}},
+		options.FindOneAndUpdate().SetReturnDocument(options.After),
+	).Decode(&sug)
+	if err == mongo.ErrNoDocuments {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "only approved or edited suggestions can be marked Apply on site"})
 		return
 	}
-	if sug.Status != models.SuggestionStatusApproved && sug.Status != models.SuggestionStatusEdited {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "only approved or edited suggestions can be applied (current status: " + string(sug.Status) + ")"})
-		return
-	}
-	if !models.IsApplyableKind(sug.Kind) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "suggestion kind " + sug.Kind + " is a manual task and cannot be applied through an adapter"})
-		return
-	}
-	if project.AdapterType == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "project has no adapter_type configured"})
-		return
-	}
-
-	adapter, err := adapters.Get(project.AdapterType)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update suggestion"})
 		return
 	}
-
-	now := time.Now().UTC()
-	before := h.pageMetrics(ctx, id, sug.Page, now.AddDate(0, 0, -28), now.AddDate(0, 0, -1))
-
-	change := models.AppliedChange{
-		ID:             bson.NewObjectID(),
-		ProjectID:      id,
-		SuggestionID:   &sid,
-		Kind:           sug.Kind,
-		Page:           sug.Page,
-		Value:          sug.FinalValue,
-		Adapter:        adapter.Name(),
-		AppliedBy:      ptrOID(middleware.GetUserID(c)),
-		AppliedAt:      now,
-		BeforeSnapshot: before,
-	}
-
-	applyErr := adapter.Apply(ctx, project.AdapterEndpoint, project.AdapterAPIKey, adapters.Change{
-		Kind:  sug.Kind,
-		Page:  sug.Page,
-		Value: sug.FinalValue,
-	})
-	if applyErr != nil {
-		change.Status = "failed"
-		change.Error = applyErr.Error()
-		c.JSON(http.StatusBadGateway, gin.H{"error": applyErr.Error(), "change": change})
-		_, _ = h.db.Collection("applied_changes").InsertOne(ctx, change)
-		return
-	}
-
-	change.Status = "applied"
-	if _, err = h.db.Collection("applied_changes").InsertOne(ctx, change); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to log applied change"})
-		return
-	}
-	_, _ = h.db.Collection("suggestions").UpdateOne(ctx, bson.M{"_id": sid}, bson.M{
-		"$set": bson.M{"applied_at": now, "updated_at": now},
-	})
-
-	c.JSON(http.StatusOK, change)
+	c.JSON(http.StatusOK, sug)
 }
 
 // Impact godoc
@@ -183,7 +117,7 @@ func (h *ApplyHandler) Impact(c *gin.Context) {
 		}
 		var after models.PageMetrics
 		if afterEnd.After(afterStart) || afterEnd.Equal(afterStart) {
-			after = h.pageMetrics(ctx, id, ch.Page, afterStart, afterEnd)
+			after = pageMetrics(ctx, h.db, id, ch.Page, afterStart, afterEnd)
 		}
 		result = append(result, gin.H{
 			"change":     ch,
@@ -197,7 +131,7 @@ func (h *ApplyHandler) Impact(c *gin.Context) {
 
 // pageMetrics aggregates gsc_rows for one page over [start, end] (inclusive,
 // YYYY-MM-DD strings compared lexicographically).
-func (h *ApplyHandler) pageMetrics(ctx context.Context, projectID bson.ObjectID, page string, start, end time.Time) models.PageMetrics {
+func pageMetrics(ctx context.Context, db *mongo.Database, projectID bson.ObjectID, page string, start, end time.Time) models.PageMetrics {
 	pipeline := mongo.Pipeline{
 		{{Key: "$match", Value: bson.D{
 			{Key: "project_id", Value: projectID},
@@ -214,7 +148,7 @@ func (h *ApplyHandler) pageMetrics(ctx context.Context, projectID bson.ObjectID,
 			{Key: "pos_weighted", Value: bson.D{{Key: "$sum", Value: bson.D{{Key: "$multiply", Value: bson.A{"$position", "$impressions"}}}}}},
 		}}},
 	}
-	cursor, err := h.db.Collection("gsc_rows").Aggregate(ctx, pipeline)
+	cursor, err := db.Collection("gsc_rows").Aggregate(ctx, pipeline)
 	if err != nil {
 		return models.PageMetrics{}
 	}
@@ -235,8 +169,4 @@ func (h *ApplyHandler) pageMetrics(ctx context.Context, projectID bson.ObjectID,
 		CTR:         r.Clicks / r.Impressions,
 		Position:    r.PosWeighted / r.Impressions,
 	}
-}
-
-func ptrOID(id bson.ObjectID) *bson.ObjectID {
-	return &id
 }

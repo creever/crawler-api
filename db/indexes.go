@@ -49,6 +49,32 @@ func EnsureIndexes(database *mongo.Database, logger *zap.Logger) {
 		Options: options.Index().SetName("projects_owner_id"),
 	})
 
+	// page_profiles: one per project × URL, removed when no run renews them
+	create("page_profiles", mongo.IndexModel{
+		Keys:    bson.D{{Key: "project_id", Value: 1}, {Key: "url", Value: 1}},
+		Options: options.Index().SetUnique(true).SetName("page_profiles_project_url"),
+	})
+	create("page_profiles", mongo.IndexModel{
+		Keys:    bson.D{{Key: "expires_at", Value: 1}},
+		Options: options.Index().SetExpireAfterSeconds(0).SetName("page_profiles_ttl"),
+	})
+
+	// seo_tasks: one per project × finding, so a repeated finding updates it
+	create("seo_tasks", mongo.IndexModel{
+		Keys:    bson.D{{Key: "project_id", Value: 1}, {Key: "key", Value: 1}},
+		Options: options.Index().SetUnique(true).SetName("seo_tasks_project_key"),
+	})
+	create("seo_tasks", mongo.IndexModel{
+		Keys:    bson.D{{Key: "project_id", Value: 1}, {Key: "status", Value: 1}, {Key: "metrics.impressions", Value: -1}},
+		Options: options.Index().SetName("seo_tasks_project_status_impressions"),
+	})
+
+	// applied_changes: a task logs one change per page
+	create("applied_changes", mongo.IndexModel{
+		Keys:    bson.D{{Key: "task_id", Value: 1}, {Key: "page", Value: 1}},
+		Options: options.Index().SetName("applied_changes_task_page"),
+	})
+
 	// gsc_rows: unique row per project × query × page × date × device (upsert key)
 	create("gsc_rows", mongo.IndexModel{
 		Keys: bson.D{

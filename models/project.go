@@ -35,8 +35,8 @@ type Project struct {
 	Language string `bson:"language"  json:"language"`
 	// Currency labels GA4 revenue (e.g. "EUR"). Empty leaves it unlabelled.
 	Currency  string    `bson:"currency"  json:"currency"`
-	CreatedAt     time.Time `bson:"created_at"       json:"created_at"`
-	UpdatedAt     time.Time `bson:"updated_at"               json:"updated_at"`
+	CreatedAt time.Time `bson:"created_at"       json:"created_at"`
+	UpdatedAt time.Time `bson:"updated_at"               json:"updated_at"`
 }
 
 // ProjectUpdateInput contains the fields that can be updated on a Project

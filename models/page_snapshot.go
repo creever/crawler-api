@@ -65,12 +65,12 @@ type PageSnapshot struct {
 	Lang string `bson:"lang" json:"lang"`
 	// Availability comes from the page's structured data: in_stock,
 	// out_of_stock, or empty when the page does not state it.
-	Availability string `bson:"availability" json:"availability"`
-	OGTitle         string        `bson:"og_title"         json:"og_title"`
-	OGDescription   string        `bson:"og_description"   json:"og_description"`
-	SchemaTypes     []string      `bson:"schema_types"     json:"schema_types"`
-	Headings        []PageHeading `bson:"headings"         json:"headings"`
-	Prose           []string      `bson:"prose"            json:"prose"`
+	Availability  string        `bson:"availability" json:"availability"`
+	OGTitle       string        `bson:"og_title"         json:"og_title"`
+	OGDescription string        `bson:"og_description"   json:"og_description"`
+	SchemaTypes   []string      `bson:"schema_types"     json:"schema_types"`
+	Headings      []PageHeading `bson:"headings"         json:"headings"`
+	Prose         []string      `bson:"prose"            json:"prose"`
 	// CategoryText is the existing descriptive text of a listing page. It is
 	// also the current value of a category_text suggestion.
 	CategoryText     string           `bson:"category_text"      json:"category_text"`

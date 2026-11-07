@@ -94,6 +94,52 @@ var mcpTools = []mcpTool{
 		},
 	},
 	{
+		Name:        "list_tasks",
+		Description: "List a project's SEO tasks, biggest search reach first. Each task is one problem found by probing the public site, however many pages it touches. Work from get_task.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"project_id": map[string]interface{}{"type": "string", "description": "Project ID"},
+				"status":     map[string]interface{}{"type": "string", "description": "open, claimed, done, verified, reopened, resolved or dismissed. Default: open"},
+				"limit":      map[string]interface{}{"type": "integer", "description": "Max tasks (default 20)"},
+			},
+			"required": []string{"project_id"},
+		},
+	},
+	{
+		Name:        "get_task",
+		Description: "Get one SEO task: a brief to work from, with the problem, evidence, examples, what to avoid and how the fix will be checked, plus the full list of affected pages.",
+		InputSchema: map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{"task_id": map[string]interface{}{"type": "string", "description": "Task ID"}},
+			"required":   []string{"task_id"},
+		},
+	},
+	{
+		Name:        "claim_task",
+		Description: "Claim an open or reopened SEO task before working on it. Only one claim succeeds, so two workers cannot take the same task.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"task_id": map[string]interface{}{"type": "string", "description": "Task ID"},
+				"agent":   map[string]interface{}{"type": "string", "description": "Who is claiming it"},
+			},
+			"required": []string{"task_id"},
+		},
+	},
+	{
+		Name:        "complete_task",
+		Description: "Report an SEO task done, only after the change is live on the public site. A recrawl of a sample of its pages follows at once, and a failed check reopens the task.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"task_id": map[string]interface{}{"type": "string", "description": "Task ID"},
+				"summary": map[string]interface{}{"type": "string", "description": "What was changed"},
+			},
+			"required": []string{"task_id", "summary"},
+		},
+	},
+	{
 		Name:        "list_suggestions",
 		Description: "List AI fix suggestions for a project, optionally filtered by status (pending, approved, rejected, edited).",
 		InputSchema: map[string]interface{}{
@@ -190,6 +236,14 @@ func (h *MCPHandler) handleToolCall(c *gin.Context, req mcpRequest) {
 		result, toolErr = h.toolGA4Report(ctx, params.Arguments)
 	case "start_crawl":
 		result, toolErr = h.toolStartCrawl(ctx, params.Arguments)
+	case "list_tasks":
+		result, toolErr = h.toolListTasks(ctx, params.Arguments)
+	case "get_task":
+		result, toolErr = h.toolGetTask(ctx, params.Arguments)
+	case "claim_task":
+		result, toolErr = h.toolClaimTask(ctx, params.Arguments)
+	case "complete_task":
+		result, toolErr = h.toolCompleteTask(ctx, params.Arguments)
 	case "list_suggestions":
 		result, toolErr = h.toolListSuggestions(ctx, params.Arguments)
 	default:
@@ -405,6 +459,79 @@ func (h *MCPHandler) toolStartCrawl(ctx context.Context, args map[string]interfa
 		return nil, err.Error()
 	}
 	return gin.H{"enqueued": true, "queue_entry_id": entryID.Hex(), "url": url}, ""
+}
+
+func argTaskFilter(args map[string]interface{}) (bson.M, string) {
+	raw, _ := args["task_id"].(string)
+	id, err := bson.ObjectIDFromHex(raw)
+	if err != nil {
+		return nil, "invalid task_id"
+	}
+	return bson.M{"_id": id}, ""
+}
+
+func (h *MCPHandler) toolListTasks(ctx context.Context, args map[string]interface{}) (interface{}, string) {
+	oid, errMsg := h.argProjectID(args)
+	if errMsg != "" {
+		return nil, errMsg
+	}
+	status, _ := args["status"].(string)
+	if status == "" {
+		status = string(models.TaskStatusOpen)
+	}
+	tasks, err := listTasks(ctx, h.db, oid, status, int64(argInt(args, "limit", 20)))
+	if err != nil {
+		return nil, err.Error()
+	}
+	rows := make([]gin.H, 0, len(tasks))
+	for _, t := range tasks {
+		rows = append(rows, gin.H{
+			"task_id": t.ID.Hex(), "title": t.Title, "issue": t.Issue, "scope": t.Scope, "status": t.Status,
+			"confidence": t.Confidence, "pages": t.Metrics.Pages, "impressions": t.Metrics.Impressions, "clicks": t.Metrics.Clicks,
+		})
+	}
+	return gin.H{"count": len(rows), "tasks": rows}, ""
+}
+
+func (h *MCPHandler) toolGetTask(ctx context.Context, args map[string]interface{}) (interface{}, string) {
+	filter, errMsg := argTaskFilter(args)
+	if errMsg != "" {
+		return nil, errMsg
+	}
+	var t models.SEOTask
+	if err := h.db.Collection("seo_tasks").FindOne(ctx, filter).Decode(&t); err != nil {
+		return nil, "task not found"
+	}
+	return gin.H{"task_id": t.ID.Hex(), "status": t.Status, "brief": t.Brief(), "pages": t.Pages, "checks": t.Checks, "verification": t.Verification}, ""
+}
+
+func (h *MCPHandler) toolClaimTask(ctx context.Context, args map[string]interface{}) (interface{}, string) {
+	filter, errMsg := argTaskFilter(args)
+	if errMsg != "" {
+		return nil, errMsg
+	}
+	agent, _ := args["agent"].(string)
+	if agent == "" {
+		agent = "harness"
+	}
+	t, err := claimTask(ctx, h.db, filter, agent)
+	if err != nil {
+		return nil, "task not found, or it is not open"
+	}
+	return gin.H{"task_id": t.ID.Hex(), "status": t.Status, "brief": t.Brief(), "pages": t.Pages}, ""
+}
+
+func (h *MCPHandler) toolCompleteTask(ctx context.Context, args map[string]interface{}) (interface{}, string) {
+	filter, errMsg := argTaskFilter(args)
+	if errMsg != "" {
+		return nil, errMsg
+	}
+	summary, _ := args["summary"].(string)
+	t, err := completeTask(ctx, h.db, h.asynqClient, filter, summary)
+	if err != nil {
+		return nil, "task not found, or it cannot be completed: " + err.Error()
+	}
+	return gin.H{"task_id": t.ID.Hex(), "status": t.Status, "note": "A recheck of a sample of the pages is queued."}, ""
 }
 
 func (h *MCPHandler) toolListSuggestions(ctx context.Context, args map[string]interface{}) (interface{}, string) {

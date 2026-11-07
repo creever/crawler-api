@@ -253,3 +253,80 @@ func TestIntegrationSingleOpportunityWithoutPage(t *testing.T) {
 		t.Errorf("status = %s, llm calls = %d", a.Status, len(stub.calls))
 	}
 }
+
+// A proposal lands on the detected pattern even when its page was read during
+// the same run, and the reviewer no longer sees it.
+func TestIntegrationProposalJoinsDetectedPattern(t *testing.T) {
+	database := integrationDB(t)
+	ctx := context.Background()
+	p := &Processor{db: database, logger: zap.NewNop()}
+	project := models.Project{ID: bson.NewObjectID(), Name: "Shop", URL: "https://shop.example"}
+	now := time.Now().UTC()
+
+	var pages []models.PageProfile
+	for i := 0; i < 6; i++ {
+		pr := profile(fmt.Sprintf("https://shop.example/p-%d", i), models.PageKindProduct,
+			fmt.Sprintf("Title %d", i), fmt.Sprintf("Item %d. Have a look at our whole range today!", i))
+		pr.ProjectID, pr.FetchedAt, pr.ExpiresAt = project.ID, now, now.Add(time.Hour)
+		pages = append(pages, pr)
+		if _, err := database.Collection("page_profiles").InsertOne(ctx, pr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := p.refreshSiteTasks(ctx, &project, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.refreshSiteTasks(ctx, &project, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	count := func(filter bson.M) int64 {
+		filter["project_id"] = project.ID
+		n, err := database.Collection("seo_tasks").CountDocuments(ctx, filter)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if count(bson.M{}) != 1 {
+		t.Fatalf("a repeated run must not add tasks, got %d", count(bson.M{}))
+	}
+
+	s := suggestion(pages[2].SourceURL, models.IssueTemplatedMeta, "page", models.PageKindProduct)
+	s.ProjectID, s.Status, s.CreatedAt = project.ID, models.SuggestionStatusPending, now
+	s.ProposedValue = "Proposal"
+	if _, err := database.Collection("suggestions").InsertOne(ctx, s); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.mergeAnalysisFindings(ctx, &project, now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if count(bson.M{}) != 1 {
+		t.Fatalf("the proposal must join the pattern's task, got %d tasks", count(bson.M{}))
+	}
+	var got models.Suggestion
+	if err := database.Collection("suggestions").FindOne(ctx, bson.M{"_id": s.ID}).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != models.SuggestionStatusCovered || got.TaskID == nil {
+		t.Fatalf("suggestion: %+v", got)
+	}
+	var task models.SEOTask
+	if err := database.Collection("seo_tasks").FindOne(ctx, bson.M{"_id": *got.TaskID}).Decode(&task); err != nil {
+		t.Fatal(err)
+	}
+	if task.Source != models.TaskSourceDetector || len(task.Pages) != 6 || task.Examples[0].Proposed != "Proposal" {
+		t.Fatalf("task: %+v", task)
+	}
+
+	// The site fixes the wording by itself: the open task closes.
+	if _, err := database.Collection("page_profiles").UpdateMany(ctx, bson.M{"project_id": project.ID},
+		bson.A{bson.M{"$set": bson.M{"meta_description": bson.M{"$concat": bson.A{"$url", " own text"}}}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.refreshSiteTasks(ctx, &project, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if count(bson.M{"status": models.TaskStatusResolved}) != 1 {
+		t.Fatal("a pattern that disappeared must close its task")
+	}
+}

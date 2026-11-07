@@ -30,7 +30,7 @@ import (
 const (
 	snapshotTTL = 24 * time.Hour
 	// snapshotVersion invalidates cached snapshots when extraction changes.
-	snapshotVersion = 3
+	snapshotVersion = 4
 
 	// navLinkDensity marks a block as navigation: nearly all of its text is
 	// link text. Measured on cipomarket.hu: menu 0.92, product list 0.23,
@@ -44,6 +44,8 @@ const (
 	sidebarLinkDensity = 0.4
 
 	listingMinCards = 4
+	// minHeadlineChars is the shortest heading that marks a card of a list.
+	minHeadlineChars = 20
 
 	maxSnapshotHeadings = 40
 	maxSnapshotLinks    = 40
@@ -67,8 +69,8 @@ var (
 	reTextRegion   = regexp.MustCompile(`(?i)description|leiras|leírás|seo-text`)
 	// rePrice finds an amount with its currency on either side. The currency
 	// must not run on into a word, so "12 kronor" or "5 kraj" is not "12 kr".
-	rePrice = regexp.MustCompile(`(?i)(?:` + priceAmount + `\s*` + priceCurrency + `|` + priceCurrency + `\s*` + priceAmount + `)(?:[^\p{L}\p{N}]|$)`)
-	reSpaces       = regexp.MustCompile(`\s+`)
+	rePrice  = regexp.MustCompile(`(?i)(?:` + priceAmount + `\s*` + priceCurrency + `|` + priceCurrency + `\s*` + priceAmount + `)(?:[^\p{L}\p{N}]|$)`)
+	reSpaces = regexp.MustCompile(`\s+`)
 )
 
 // blockTags end a run of inline text.
@@ -217,8 +219,10 @@ func isChromeBlock(b *htmlBlock) bool {
 		return true
 	}
 	// On a short page the menu outweighs the content, so a wrapper up to <body>
-	// can look like navigation. A block holding the H1 is never navigation.
-	return b.text >= navMinChars && b.linkDensity() >= navLinkDensity && !containsH1(n)
+	// can look like navigation. A block holding the H1 is never navigation, and
+	// neither is <body>: its parts are judged one by one.
+	return n.DataAtom != atom.Body && b.text >= navMinChars && b.linkDensity() >= navLinkDensity &&
+		!containsH1(n) && !containsListing(b)
 }
 
 func containsH1(n *html.Node) bool {
@@ -226,7 +230,8 @@ func containsH1(n *html.Node) bool {
 }
 
 // listingCards returns the repeated item cards directly under b, if any. A
-// card holds a link, and most cards of a list show a price.
+// card holds a link, and most cards of a list show a price or, on a list of
+// articles or jobs, their own heading.
 func listingCards(b *htmlBlock) []*htmlBlock {
 	groups := make(map[string][]*htmlBlock)
 	for _, c := range b.children {
@@ -242,17 +247,43 @@ func listingCards(b *htmlBlock) []*htmlBlock {
 		if len(cards) < listingMinCards || len(cards) <= len(best) {
 			continue
 		}
-		priced := 0
+		items := 0
 		for _, c := range cards {
-			if firstLink(c.node) != nil && rePrice.MatchString(visibleText(c.node)) {
-				priced++
+			if firstLink(c.node) != nil && (rePrice.MatchString(visibleText(c.node)) || hasCardHeading(c.node)) {
+				items++
 			}
 		}
-		if priced*2 >= len(cards) {
+		if items*2 >= len(cards) {
 			best = cards
 		}
 	}
 	return best
+}
+
+// hasCardHeading reports a heading long enough to be a headline. A menu's
+// column headings, such as "Women", are too short.
+func hasCardHeading(n *html.Node) bool {
+	return findFirst(n, func(x *html.Node) bool {
+		switch x.DataAtom {
+		case atom.H2, atom.H3, atom.H4:
+			return utf8.RuneCountInString(visibleText(x)) >= minHeadlineChars
+		}
+		return false
+	}) != nil
+}
+
+// containsListing reports item cards at or below b. A list of linked articles
+// is nearly all links, but it is the page's content.
+func containsListing(b *htmlBlock) bool {
+	if len(listingCards(b)) > 0 {
+		return true
+	}
+	for _, c := range b.children {
+		if containsListing(c) {
+			return true
+		}
+	}
+	return false
 }
 
 func firstLink(n *html.Node) *html.Node {
@@ -1006,7 +1037,13 @@ func (p *Processor) getSnapshot(ctx context.Context, projectOID bson.ObjectID, p
 	if cached != nil {
 		return cached, nil
 	}
-	if err = pacer.wait(ctx); err != nil {
+	return p.readPage(ctx, projectOID, pageURL, useJS, pacer)
+}
+
+// readPage renders a page now, ignoring the cache, and stores its snapshot and
+// profile.
+func (p *Processor) readPage(ctx context.Context, projectOID bson.ObjectID, pageURL string, useJS bool, pacer *renderPacer) (*models.PageSnapshot, error) {
+	if err := pacer.wait(ctx); err != nil {
 		return nil, err
 	}
 	rendered, status, err := p.fetchRender(ctx, pageURL, useJS)
@@ -1026,6 +1063,9 @@ func (p *Processor) getSnapshot(ctx context.Context, projectOID bson.ObjectID, p
 		bson.M{"project_id": projectOID, "url": snap.URL}, snap, options.Replace().SetUpsert(true),
 	); err != nil {
 		return nil, fmt.Errorf("store snapshot: %w", err)
+	}
+	if err = p.saveProfile(ctx, snap, now); err != nil {
+		return nil, fmt.Errorf("store profile: %w", err)
 	}
 	return snap, nil
 }

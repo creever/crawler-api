@@ -27,7 +27,13 @@ const (
 	analysisRenderBudget = 20
 	// analysisOppsPerLimit is how many ranked opportunities are read per page
 	// of the limit, since several opportunities can fall on one page.
-	analysisOppsPerLimit = 10
+	analysisOppsPerLimit = 50
+	// groupRepresentatives is how many pages of one page type a run analyzes.
+	// A shared problem shows on a few pages, and the reach comes from the group.
+	groupRepresentatives = 3
+	// groupAnalysesPerWindow stops a page type from being read again and again
+	// after it has been covered.
+	groupAnalysesPerWindow = 6
 
 	// recentChangeWindow keeps a page out of bulk runs after a change was
 	// applied, so its impact can be measured.
@@ -128,7 +134,7 @@ func technicalOutcome(snap *models.PageSnapshot, issue, cause, kind, proposed st
 			Status: models.AnalysisStatusCompleted, PrimaryIssue: issue, RootCause: cause, Confidence: "high",
 			Evidence: []models.AnalysisEvidence{{Ref: "P1", Claim: issue, Fact: fact}},
 		},
-		Actions: []analysisAction{{Kind: kind, Priority: 1, Effort: "S", Proposed: proposed, Rationale: cause, EvidenceRefs: []string{"P1"}}},
+		Actions: []analysisAction{{Kind: kind, Issue: models.IssueTechnical, Scope: "page", Priority: 1, Effort: "S", Proposed: proposed, Rationale: cause, EvidenceRefs: []string{"P1"}}},
 	}
 }
 
@@ -265,7 +271,8 @@ func buildSuggestions(a *models.PageAnalysis, actions []analysisAction, target a
 		}
 		out = append(out, models.Suggestion{
 			ID: bson.NewObjectID(), ProjectID: a.ProjectID, OpportunityID: oppID, AnalysisID: &a.ID,
-			Kind: act.Kind, Target: strings.TrimSpace(act.Target), Priority: priority, Effort: normalizeEffort(act.Effort),
+			Kind: act.Kind, Issue: act.Issue, Scope: act.Scope, PageGroup: a.PageGroup,
+			Target: strings.TrimSpace(act.Target), Priority: priority, Effort: normalizeEffort(act.Effort),
 			EvidenceRefs: act.EvidenceRefs, Page: target.Page, Query: query, Language: a.Language,
 			CurrentValue: currentValue(act.Kind, snap), ProposedValue: act.Proposed,
 			Status: models.SuggestionStatusPending, Reason: strings.TrimSpace(act.Rationale),
@@ -330,6 +337,7 @@ func finishAnalysis(a *models.PageAnalysis, projectOID bson.ObjectID, target ana
 	a.Page = target.Page
 	a.Provider, a.Model = provider, model
 	a.CreatedAt = now
+	a.PageGroup = snapshotGroup(target.Page, snap)
 	a.OpportunityIDs = make([]bson.ObjectID, 0, len(target.Opps))
 	for _, o := range target.Opps {
 		a.OpportunityIDs = append(a.OpportunityIDs, o.ID)
@@ -372,7 +380,8 @@ func (p *Processor) storeAnalysis(ctx context.Context, a *models.PageAnalysis, s
 // still has its suggestions, or a recent change is being measured.
 func (p *Processor) pageIsBusy(ctx context.Context, projectOID bson.ObjectID, page string, now time.Time) (bool, error) {
 	pending, err := p.db.Collection("suggestions").CountDocuments(ctx, bson.M{
-		"project_id": projectOID, "page": page, "status": models.SuggestionStatusPending,
+		"project_id": projectOID, "page": page,
+		"status": bson.M{"$in": []models.SuggestionStatus{models.SuggestionStatusPending, models.SuggestionStatusApplyOnSite}},
 	}, options.Count().SetLimit(1))
 	if err != nil {
 		return false, err
@@ -388,6 +397,33 @@ func (p *Processor) pageIsBusy(ctx context.Context, projectOID bson.ObjectID, pa
 		return false, err
 	}
 	return applied > 0, nil
+}
+
+// groupOfPage returns a page's type. A page without a profile is read first, and
+// that read also serves the analysis.
+func (p *Processor) groupOfPage(ctx context.Context, project *models.Project, page string, pacer *renderPacer) (string, error) {
+	var profile models.PageProfile
+	err := p.db.Collection("page_profiles").FindOne(ctx, bson.M{"project_id": project.ID, "url": normalizePageURL(page)}).Decode(&profile)
+	if err == nil {
+		return profile.Group, nil
+	}
+	snap, err := p.getSnapshot(ctx, project.ID, page, project.UseJS, pacer)
+	if err != nil {
+		return "", err
+	}
+	return snapshotGroup(page, snap), nil
+}
+
+// groupIsCovered reports whether a page type had enough analyses lately.
+func (p *Processor) groupIsCovered(ctx context.Context, projectOID bson.ObjectID, group string, now time.Time) (bool, error) {
+	if strings.HasPrefix(group, "page:") {
+		return false, nil
+	}
+	n, err := p.db.Collection("page_analyses").CountDocuments(ctx, bson.M{
+		"project_id": projectOID, "page_group": group, "status": models.AnalysisStatusCompleted,
+		"created_at": bson.M{"$gte": now.Add(-unchangedPageWindow)},
+	}, options.Count().SetLimit(groupAnalysesPerWindow))
+	return n >= groupAnalysesPerWindow, err
 }
 
 // pageIsUnchanged reports whether the page's content is the same as at its
@@ -489,6 +525,21 @@ func (p *Processor) HandleSuggestionsGenerate(ctx context.Context, t *asynq.Task
 		}
 	}
 
+	// The site-wide picture needs no AI, so a project without one still gets
+	// its pattern tasks.
+	pacer := &renderPacer{delay: p.siteCrawlDelay(ctx, project.URL), remaining: siteSampleBudget}
+	if bulk {
+		read, sampleErr := p.sampleSite(ctx, &project, pacer)
+		if sampleErr != nil {
+			p.logger.Warn("site sample failed", zap.String("project_id", payload.ProjectID), zap.Error(sampleErr))
+		}
+		if refreshErr := p.refreshSiteTasks(ctx, &project, time.Now().UTC()); refreshErr != nil {
+			p.logger.Warn("site tasks not refreshed", zap.String("project_id", payload.ProjectID), zap.Error(refreshErr))
+		}
+		p.logger.Info("site sampled", zap.String("project_id", payload.ProjectID), zap.Int("pages_read", read))
+	}
+	pacer.remaining = analysisRenderBudget
+
 	ai, provider, model, err := p.suggestionAI(ctx, projectOID)
 	if err != nil {
 		return fmt.Errorf("%w: %v", asynq.SkipRetry, err)
@@ -502,8 +553,8 @@ func (p *Processor) HandleSuggestionsGenerate(ctx context.Context, t *asynq.Task
 		return nil
 	}
 
-	pacer := &renderPacer{delay: p.siteCrawlDelay(ctx, project.URL), remaining: analysisRenderBudget}
 	analyzed, generated := 0, 0
+	perGroup := make(map[string]int)
 	for _, target := range targets {
 		if analyzed >= limit {
 			break
@@ -523,6 +574,23 @@ func (p *Processor) HandleSuggestionsGenerate(ctx context.Context, t *asynq.Task
 			}
 			if chErr == nil && unchanged {
 				continue
+			}
+			group, groupErr := p.groupOfPage(ctx, &project, target.Page, pacer)
+			if errors.Is(groupErr, errRenderBudget) {
+				break
+			}
+			if groupErr == nil {
+				if perGroup[group] >= groupRepresentatives {
+					continue
+				}
+				covered, coveredErr := p.groupIsCovered(ctx, projectOID, group, now)
+				if coveredErr != nil {
+					return fmt.Errorf("check page type: %w", coveredErr)
+				}
+				if covered {
+					continue
+				}
+				perGroup[group]++
 			}
 		}
 
@@ -550,6 +618,17 @@ func (p *Processor) HandleSuggestionsGenerate(ctx context.Context, t *asynq.Task
 			zap.Int("suggestions", len(suggestions)),
 			zap.Int("warnings", len(a.ValidationWarnings)),
 		)
+	}
+
+	if bulk {
+		// Analyses read more pages, and the patterns have to include those for
+		// their proposals to land on the right task.
+		if refreshErr := p.refreshSiteTasks(ctx, &project, time.Now().UTC()); refreshErr != nil {
+			p.logger.Warn("site tasks not refreshed", zap.String("project_id", payload.ProjectID), zap.Error(refreshErr))
+		}
+		if mergeErr := p.mergeAnalysisFindings(ctx, &project, time.Now().UTC()); mergeErr != nil {
+			p.logger.Warn("findings not merged", zap.String("project_id", payload.ProjectID), zap.Error(mergeErr))
+		}
 	}
 
 	p.logger.Info("suggestions:generate completed",

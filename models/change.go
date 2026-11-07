@@ -6,18 +6,18 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
-// AppliedChange logs one approved suggestion that was pushed to the target
-// site via a site adapter, together with the "before" GSC snapshot used for
-// impact tracking.
+// AppliedChange logs one change that reached the site, together with the
+// "before" GSC snapshot used for impact tracking. A task records one per page.
 // MongoDB collection: applied_changes
 type AppliedChange struct {
 	ID           bson.ObjectID  `bson:"_id,omitempty"   json:"id,omitempty"`
 	ProjectID    bson.ObjectID  `bson:"project_id"      json:"project_id"`
 	SuggestionID *bson.ObjectID `bson:"suggestion_id,omitempty" json:"suggestion_id,omitempty"`
-	Kind         string         `bson:"kind"            json:"kind"` // title | meta_description | category_text
+	TaskID       *bson.ObjectID `bson:"task_id,omitempty"       json:"task_id,omitempty"`
+	Kind         string         `bson:"kind"            json:"kind"` // a suggestion kind, or a task's issue
 	Page         string         `bson:"page"            json:"page"`
 	Value        string         `bson:"value"           json:"value"`   // the text that was applied
-	Adapter      string         `bson:"adapter"         json:"adapter"` // e.g. "cipomarket"
+	Adapter      string         `bson:"adapter"         json:"adapter"` // "task", or the name of a former site adapter
 	Status       string         `bson:"status"          json:"status"`  // applied | failed
 	Error        string         `bson:"error,omitempty" json:"error,omitempty"`
 	AppliedBy    *bson.ObjectID `bson:"applied_by,omitempty" json:"applied_by,omitempty"`

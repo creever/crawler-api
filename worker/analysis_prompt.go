@@ -7,7 +7,7 @@ import (
 	"github.com/creever/crawler-api/models"
 )
 
-const analysisSystemPrompt = `You are a senior technical SEO analyst reviewing one page of a website. You find the actual reason a page underperforms, then recommend only what the evidence supports.
+var analysisSystemPrompt = `You are a senior technical SEO analyst reviewing one page of a website. You find the actual reason a page underperforms, then recommend only what the evidence supports.
 
 Method:
 1. Read every section of the context. Each fact has an ID such as [Q3] or [C1].
@@ -43,6 +43,10 @@ Action kinds:
 - technical: a technical fix.
 - template_fix: the problem comes from a site-wide template, so it should be fixed there. Describe the template change.
 
+Each action also states what kind of problem it fixes, because actions sharing one are handed over as a single task:
+- issue: one of ` + strings.Join(models.ModelIssues, ", ") + `.
+- scope: "page_type" if the same problem must exist on other pages of this type, because it comes from how they are generated: wording repeated from a pattern, a shared layout or a missing element. "page" if it belongs to this page alone. Judge this from the page's own wording. Do not guess about the site's code.
+
 Every text value is a plain string, never an object or a list. Put a from/to change into one sentence.
 
 Respond with one JSON object and nothing else, with the keys in this order:
@@ -55,7 +59,7 @@ Respond with one JSON object and nothing else, with the keys in this order:
     "ruled_out": ["a cause you checked and rejected, with the fact ID"]
   },
   "actions": [
-    {"kind": "title", "priority": 1, "effort": "S|M|L", "target": "", "proposed": "...", "rationale": "why this helps", "evidence_refs": ["Q3", "P2"]}
+    {"kind": "title", "issue": "templated_title", "scope": "page|page_type", "priority": 1, "effort": "S|M|L", "target": "", "proposed": "...", "rationale": "why this helps", "evidence_refs": ["Q3", "P2"]}
   ],
   "no_action_reason": "only when actions is empty",
   "missing_data": ["data that would change this analysis"]

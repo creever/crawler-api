@@ -14,6 +14,12 @@ const (
 	SuggestionStatusApproved SuggestionStatus = "approved"
 	SuggestionStatusRejected SuggestionStatus = "rejected"
 	SuggestionStatusEdited   SuggestionStatus = "edited" // approved with manual edits
+	// SuggestionStatusApplyOnSite marks a decided suggestion for the site. It
+	// changes nothing by itself: a task can be created from it later.
+	SuggestionStatusApplyOnSite SuggestionStatus = "apply_on_site"
+	// SuggestionStatusCovered means a task for several pages holds this
+	// suggestion, so it left the review queue.
+	SuggestionStatusCovered SuggestionStatus = "covered"
 )
 
 // Suggestion kinds.
@@ -31,8 +37,8 @@ const (
 	SuggestionKindTemplateFix  = "template_fix"
 )
 
-// IsApplyableKind reports whether a suggestion kind can be pushed to the site
-// through an adapter. All other kinds are manual tasks.
+// IsApplyableKind reports whether a suggestion kind is complete publishable
+// text. Other kinds describe a change and need someone to work it out.
 func IsApplyableKind(kind string) bool {
 	switch kind {
 	case SuggestionKindTitle, SuggestionKindMeta, SuggestionKindCategoryText:
@@ -65,7 +71,13 @@ type Suggestion struct {
 	// Target names what a manual action touches, e.g. the page to redirect to.
 	Target   string `bson:"target,omitempty"   json:"target,omitempty"`
 	Priority int    `bson:"priority,omitempty" json:"priority,omitempty"` // 1 = most important
-	Effort   string `bson:"effort,omitempty"   json:"effort,omitempty"`   // S | M | L
+	// Issue, Scope and PageGroup decide which findings merge into one task.
+	Issue     string `bson:"issue,omitempty"      json:"issue,omitempty"`
+	Scope     string `bson:"scope,omitempty"      json:"scope,omitempty"` // page | page_type
+	PageGroup string `bson:"page_group,omitempty" json:"page_group,omitempty"`
+	// TaskID is the task holding this suggestion, if any.
+	TaskID *bson.ObjectID `bson:"task_id,omitempty" json:"task_id,omitempty"`
+	Effort string         `bson:"effort,omitempty"   json:"effort,omitempty"` // S | M | L
 	// EvidenceRefs are the context-pack facts the action is based on.
 	EvidenceRefs  []string `bson:"evidence_refs,omitempty" json:"evidence_refs,omitempty"`
 	Page          string   `bson:"page"             json:"page"`
@@ -82,7 +94,7 @@ type Suggestion struct {
 	Prompt      string         `bson:"prompt"           json:"prompt"`
 	RawResponse string         `bson:"raw_response"     json:"raw_response"`
 	ReviewedBy  *bson.ObjectID `bson:"reviewed_by,omitempty" json:"reviewed_by,omitempty"`
-	// AppliedAt is set when the suggestion was pushed to the site via an adapter.
+	// AppliedAt is set on suggestions pushed through the former site adapters.
 	AppliedAt *time.Time `bson:"applied_at,omitempty" json:"applied_at,omitempty"`
 	CreatedAt time.Time  `bson:"created_at"       json:"created_at"`
 	UpdatedAt time.Time  `bson:"updated_at"       json:"updated_at"`

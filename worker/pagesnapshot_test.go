@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -287,5 +288,24 @@ func TestParseCrawlDelay(t *testing.T) {
 		if got := parseCrawlDelay(c.robots); got != c.want {
 			t.Errorf("parseCrawlDelay(%q) = %v, want %v", c.robots, got, c.want)
 		}
+	}
+}
+
+// A news section: nearly all of its text is links, and it has no H1 or prices.
+func TestLinkHeavyPageWithoutH1(t *testing.T) {
+	var cards strings.Builder
+	for i := 0; i < 14; i++ {
+		fmt.Fprintf(&cards, `<article class="teaser"><a href="/news/%d"><h3>Headline number %d about something that happened today</h3></a></article>`, i, i)
+	}
+	page := `<html lang="hu"><body><nav><a href="/a">Section one</a><a href="/b">Section two</a></nav><main><div class="list">` + cards.String() + `</div></main></body></html>`
+	snap, err := extractSnapshot("https://news.example/section", 200, page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Listing == nil || snap.Listing.ItemCount != 14 {
+		t.Fatalf("listing: %+v", snap.Listing)
+	}
+	if !isListingPage(snap) || snap.Coverage.ChromeChars >= snap.Coverage.TotalChars/2 {
+		t.Fatalf("the list was read as navigation: %+v", snap.Coverage)
 	}
 }

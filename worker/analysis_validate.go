@@ -36,6 +36,8 @@ type analysisResponse struct {
 }
 
 type analysisAction struct {
+	Issue        string   `json:"issue"`
+	Scope        string   `json:"scope"`
 	Kind         string   `json:"kind"`
 	Priority     int      `json:"priority"`
 	Effort       string   `json:"effort"`
@@ -155,6 +157,8 @@ func validateAnalysis(resp *analysisResponse, pack *contextPack, snap *models.Pa
 	for _, a := range resp.Actions {
 		a.Kind = strings.TrimSpace(a.Kind)
 		a.Proposed = strings.TrimSpace(a.Proposed)
+		a.Issue = normalizeIssue(a.Issue)
+		a.Scope = normalizeScope(a.Scope)
 		if problem := validateAction(&a, pack, snap, corpus); problem != "" {
 			out.Problems = append(out.Problems, fmt.Sprintf("action %s: %s", a.Kind, problem))
 			continue
@@ -170,6 +174,23 @@ func validateAnalysis(resp *analysisResponse, pack *contextPack, snap *models.Pa
 		out.Actions = append(out.Actions, a)
 	}
 	return out
+}
+
+// normalizeIssue keeps a model's answer to the known list. An unknown code only
+// costs the action its merging, so it isn't worth a repair call.
+func normalizeIssue(issue string) string {
+	issue = strings.ToLower(strings.TrimSpace(issue))
+	if models.IsModelIssue(issue) {
+		return issue
+	}
+	return models.IssueOther
+}
+
+func normalizeScope(scope string) string {
+	if strings.EqualFold(strings.TrimSpace(scope), "page_type") {
+		return "page_type"
+	}
+	return "page"
 }
 
 func validateAction(a *analysisAction, pack *contextPack, snap *models.PageSnapshot, corpus string) string {
