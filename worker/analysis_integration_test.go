@@ -318,15 +318,191 @@ func TestIntegrationProposalJoinsDetectedPattern(t *testing.T) {
 		t.Fatalf("task: %+v", task)
 	}
 
-	// The site fixes the wording by itself: the open task closes.
-	if _, err := database.Collection("page_profiles").UpdateMany(ctx, bson.M{"project_id": project.ID},
-		bson.A{bson.M{"$set": bson.M{"meta_description": bson.M{"$concat": bson.A{"$url", " own text"}}}}}); err != nil {
+	// The site fixes the wording by itself. The pages are reread, and two runs
+	// a day apart close the task.
+	reread := func(at time.Time) {
+		t.Helper()
+		if _, err := database.Collection("page_profiles").UpdateMany(ctx, bson.M{"project_id": project.ID},
+			bson.A{bson.M{"$set": bson.M{"fetched_at": at, "meta_description": bson.M{"$concat": bson.A{"$url", " own text"}}}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reread(now.Add(time.Hour))
+	if err := p.refreshSiteTasks(ctx, &project, now.Add(2*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.refreshSiteTasks(ctx, &project, now.Add(time.Hour)); err != nil {
+	if count(bson.M{"status": models.TaskStatusResolved}) != 0 {
+		t.Fatal("one run could be chance")
+	}
+	if err := p.refreshSiteTasks(ctx, &project, now.Add(26*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if count(bson.M{"status": models.TaskStatusResolved}) != 1 {
-		t.Fatal("a pattern that disappeared must close its task")
+		t.Fatal("a pattern gone on reread pages in two runs must close its task")
+	}
+}
+
+func TestIntegrationListStaysFinite(t *testing.T) {
+	database := integrationDB(t)
+	ctx := context.Background()
+	project := models.Project{ID: bson.NewObjectID(), Name: "Shop", URL: "https://shop.example", TaskLimit: 2}
+	if _, err := database.Collection("projects").InsertOne(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for i, impressions := range []float64{10, 300, 200} {
+		d := models.SEOTask{
+			ProjectID: project.ID, Key: fmt.Sprintf("k%d", i), Source: models.TaskSourceDetector,
+			Metrics: models.TaskMetrics{Impressions: impressions},
+		}
+		if _, err := UpsertTask(ctx, database, d, time.Time{}, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	statusOf := func(key string) models.TaskStatus {
+		var task models.SEOTask
+		if err := database.Collection("seo_tasks").FindOne(ctx, bson.M{"key": key}).Decode(&task); err != nil {
+			t.Fatal(err)
+		}
+		return task.Status
+	}
+	if err := RebalanceTasks(ctx, database, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	if statusOf("k1") != models.TaskStatusOpen || statusOf("k2") != models.TaskStatusOpen || statusOf("k0") != models.TaskStatusQueued {
+		t.Fatal("the biggest tasks must fill the list")
+	}
+	if _, err := database.Collection("seo_tasks").UpdateOne(ctx, bson.M{"key": "k1"}, bson.M{"$set": bson.M{"status": models.TaskStatusDone}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := RebalanceTasks(ctx, database, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	if statusOf("k0") != models.TaskStatusOpen {
+		t.Fatal("a freed place goes to the next task")
+	}
+}
+
+func TestIntegrationAcceptJoinsTheTaskOfThatProblem(t *testing.T) {
+	database := integrationDB(t)
+	ctx := context.Background()
+	project := bson.NewObjectID()
+	now := time.Now().UTC()
+	page := "https://shop.example/p"
+	shared, err := UpsertTask(ctx, database, models.SEOTask{
+		ProjectID: project, Key: "shared", Source: models.TaskSourceDetector, Issue: models.IssueDuplicateMeta,
+		Scope: models.TaskScopeSite, Title: "Shared", Pages: []string{page}, Metrics: models.TaskMetrics{Pages: 1, Impressions: 50},
+	}, time.Time{}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := suggestion(page, models.IssueTemplatedMeta, "page", "product")
+	s.ProjectID, s.Status, s.Kind, s.ProposedValue = project, models.SuggestionStatusPending, models.SuggestionKindMeta, "AI"
+	if _, err = database.Collection("suggestions").InsertOne(ctx, s); err != nil {
+		t.Fatal(err)
+	}
+	task, err := AcceptSuggestion(ctx, database, s, "Edited", bson.NewObjectID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, _ := database.Collection("seo_tasks").CountDocuments(ctx, bson.M{"project_id": project})
+	if task.ID != shared.ID || n != 1 || task.Title != "Shared" || task.Examples[0].Proposed != "Edited" {
+		t.Fatalf("%d tasks, task: %+v", n, task)
+	}
+	var got models.Suggestion
+	if err = database.Collection("suggestions").FindOne(ctx, bson.M{"_id": s.ID}).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != models.SuggestionStatusAccepted || got.TaskID == nil || *got.TaskID != shared.ID || got.FinalValue != "Edited" {
+		t.Fatalf("suggestion: %+v", got)
+	}
+}
+
+func TestIntegrationRejectedFindingStaysAway(t *testing.T) {
+	database := integrationDB(t)
+	ctx := context.Background()
+	p := &Processor{db: database, logger: zap.NewNop()}
+	project := bson.NewObjectID()
+	page := "https://shop.example/p"
+	key := findingKey(models.IssueThinContent, "content_gap", page)
+	if _, err := database.Collection("suggestions").InsertOne(ctx, models.Suggestion{
+		ID: bson.NewObjectID(), ProjectID: project, Page: page, FindingKey: key,
+		Status: models.SuggestionStatusRejected, RejectedImpressions: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fresh := []models.Suggestion{
+		{ProjectID: project, Page: page, FindingKey: key},
+		{ProjectID: project, Page: page, FindingKey: "other"},
+	}
+	kept := p.withoutRejected(ctx, append([]models.Suggestion{}, fresh...))
+	if len(kept) != 1 || kept[0].FindingKey != "other" {
+		t.Fatalf("kept: %+v", kept)
+	}
+	day := time.Now().UTC().AddDate(0, 0, -gscDataLagDays-1)
+	if _, err := database.Collection("gsc_rows").InsertOne(ctx, gscRow(project, "q", page, day, 1, 200, 5)); err != nil {
+		t.Fatal(err)
+	}
+	if kept = p.withoutRejected(ctx, append([]models.Suggestion{}, fresh...)); len(kept) != 2 {
+		t.Fatal("twice the reach must bring it back")
+	}
+}
+
+// Finished tasks are judged from stored rows: daily averages, a page-type
+// control, and a task that did not move against it comes back once.
+func TestIntegrationMeasurement(t *testing.T) {
+	database := integrationDB(t)
+	ctx := context.Background()
+	p := &Processor{db: database, logger: zap.NewNop()}
+	project := bson.NewObjectID()
+	now := time.Now().UTC()
+	lastData := now.AddDate(0, 0, -3).Truncate(24 * time.Hour)
+	doneAt := lastData.AddDate(0, 0, -(impactGraceDays + impactWindowDays))
+	page, other := "https://shop.example/p", "https://shop.example/c-%d"
+
+	var rows []interface{}
+	add := func(url string, from, to time.Time, clicks int) {
+		for d := from; !d.After(to); d = d.AddDate(0, 0, 1) {
+			rows = append(rows, gscRow(project, "q", url, d, clicks, clicks*20, 4))
+		}
+	}
+	before, after := impactWindows(doneAt, lastData)
+	add(page, before.Start, before.End, 10)
+	add(page, after.Start, after.End, 15)
+	for i := 0; i < minControlPages; i++ {
+		url := fmt.Sprintf(other, i)
+		add(url, before.Start, before.End, 10)
+		add(url, after.Start, after.End, 15)
+		pr := profile(url, models.PageKindProduct, "T", "M")
+		pr.ProjectID, pr.ExpiresAt = project, now.Add(time.Hour)
+		if _, err := database.Collection("page_profiles").InsertOne(ctx, pr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := database.Collection("gsc_rows").InsertMany(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	task := models.SEOTask{
+		ID: bson.NewObjectID(), ProjectID: project, Key: "m", Status: models.TaskStatusVerified, PageGroup: models.PageKindProduct,
+		Pages: []string{page}, DoneAt: &doneAt, Verification: &models.TaskVerification{At: doneAt, Checked: 1},
+	}
+	if _, err := database.Collection("seo_tasks").InsertOne(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(MeasureTasksPayload{ProjectID: project.Hex()})
+	if err := p.HandleTasksMeasure(ctx, asynq.NewTask(TypeMeasureTasks, body)); err != nil {
+		t.Fatal(err)
+	}
+	var got models.SEOTask
+	if err := database.Collection("seo_tasks").FindOne(ctx, bson.M{"_id": task.ID}).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	m := got.Measurement
+	if m == nil || m.Before.Clicks != 10 || m.After.Clicks != 15 || m.ControlKind != models.ControlPageType {
+		t.Fatalf("measurement: %+v", m)
+	}
+	// +50% looks like a win, but the whole page type rose by as much.
+	if m.Verdict != models.VerdictNoChange || got.Status != models.TaskStatusReopened || got.ImpactReopens != 1 {
+		t.Fatalf("verdict %s, status %s", m.Verdict, got.Status)
 	}
 }

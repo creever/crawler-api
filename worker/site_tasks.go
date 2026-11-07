@@ -141,19 +141,50 @@ func mergeEvidence(lists ...[]models.AnalysisEvidence) []models.AnalysisEvidence
 	return out
 }
 
-// mergeIntoTask folds a repeated finding into its existing task. A dismissed
-// task stays dismissed. A pattern seen on a verified task means the fix did not
-// hold, if its pages were read after that verification.
+// dismissedReturnFactor is how much a dismissed finding has to grow to return.
+const dismissedReturnFactor = 2
+
+func reopen(t *models.SEOTask, reason string) {
+	t.Status = models.TaskStatusReopened
+	t.ReopenReason = reason
+}
+
+// lastConfirmed is when a finished task was last known to be fine.
+func lastConfirmed(t *models.SEOTask) time.Time {
+	if t.Verification != nil && !t.Verification.At.IsZero() {
+		return t.Verification.At
+	}
+	if t.DoneAt != nil {
+		return *t.DoneAt
+	}
+	return t.UpdatedAt
+}
+
+// mergeIntoTask folds a repeated finding into its task. A finished task only
+// comes back on evidence: a person accepting the finding, or a page read after
+// the task was finished. An AI repeating itself is no evidence, and a dismissed
+// task needs twice the reach it had. newestRead is the zero time when no page
+// read backs the finding.
 func mergeIntoTask(t *models.SEOTask, d models.SEOTask, newestRead time.Time, now time.Time) {
 	t.LastSeenAt = now
-	if t.Status == models.TaskStatusDismissed {
+	t.MissCount, t.LastMissAt = 0, nil
+	switch {
+	case t.IsActive():
+		if d.Source == models.TaskSourceReview && t.Status == models.TaskStatusProposed {
+			t.Status = models.TaskStatusOpen
+		}
+	case t.Status == models.TaskStatusDone:
 		return
-	}
-	if t.Status == models.TaskStatusResolved ||
-		(t.Status == models.TaskStatusVerified && t.Verification != nil && newestRead.After(t.Verification.At)) {
-		t.Status = models.TaskStatusReopened
-	}
-	if !t.IsActive() {
+	case d.Source == models.TaskSourceReview:
+		reopen(t, "A reviewer accepted this finding again after the task was finished.")
+	case t.Status == models.TaskStatusDismissed:
+		if t.DismissedImpressions <= 0 || d.Metrics.Impressions < dismissedReturnFactor*t.DismissedImpressions {
+			return
+		}
+		reopen(t, fmt.Sprintf("This was dismissed at %.0f impressions and now has %.0f.", t.DismissedImpressions, d.Metrics.Impressions))
+	case newestRead.After(lastConfirmed(t)):
+		reopen(t, "Pages read after the task was finished show the problem again.")
+	default:
 		return
 	}
 	t.Title, t.Problem, t.Goal = d.Title, d.Problem, d.Goal
@@ -161,13 +192,12 @@ func mergeIntoTask(t *models.SEOTask, d models.SEOTask, newestRead time.Time, no
 	if d.Source == models.TaskSourceDetector {
 		t.Pages, t.Checks = d.Pages, d.Checks
 		t.ConfirmedPages = uniqueStrings(d.ConfirmedPages)
-		t.Metrics = d.Metrics
 	} else {
 		t.Pages = uniqueStrings(t.Pages, d.Pages)
 		t.ConfirmedPages = uniqueStrings(t.ConfirmedPages, d.ConfirmedPages)
 		t.Checks = mergeChecks(t.Checks, d.Checks)
-		t.Metrics = d.Metrics
 	}
+	t.Metrics = d.Metrics
 	t.Examples = mergeExamples(d.Examples, t.Examples)
 	t.Evidence = mergeEvidence(d.Evidence, t.Evidence)
 	t.Avoid = uniqueStrings(t.Avoid, d.Avoid)
@@ -190,6 +220,19 @@ func mergeChecks(lists ...[]models.TaskCheck) []models.TaskCheck {
 	return out
 }
 
+// initialTaskStatus decides how a new task starts. A detected pattern is a fact
+// and waits for room on the list, an AI conclusion waits for a person, and what
+// a person accepted is ready.
+func initialTaskStatus(source string) models.TaskStatus {
+	switch source {
+	case models.TaskSourceDetector:
+		return models.TaskStatusQueued
+	case models.TaskSourceAnalysis:
+		return models.TaskStatusProposed
+	}
+	return models.TaskStatusOpen
+}
+
 // UpsertTask stores a draft, or merges it into the task with the same key, and
 // returns the stored task.
 func UpsertTask(ctx context.Context, db *mongo.Database, draft models.SEOTask, newestRead, now time.Time) (*models.SEOTask, error) {
@@ -198,7 +241,7 @@ func UpsertTask(ctx context.Context, db *mongo.Database, draft models.SEOTask, n
 	err := col.FindOne(ctx, bson.M{"project_id": draft.ProjectID, "key": draft.Key}).Decode(&existing)
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		draft.ID = bson.NewObjectID()
-		draft.Status = models.TaskStatusOpen
+		draft.Status = initialTaskStatus(draft.Source)
 		draft.LastSeenAt, draft.CreatedAt, draft.UpdatedAt = now, now, now
 		if _, err = col.InsertOne(ctx, draft); err != nil {
 			return nil, fmt.Errorf("insert task: %w", err)
@@ -247,11 +290,135 @@ func (p *Processor) refreshSiteTasks(ctx context.Context, project *models.Projec
 			return err
 		}
 	}
-	_, err = p.db.Collection("seo_tasks").UpdateMany(ctx, bson.M{
-		"project_id": project.ID, "source": models.TaskSourceDetector, "key": bson.M{"$nin": seen},
-		"status": bson.M{"$in": []models.TaskStatus{models.TaskStatusOpen, models.TaskStatusReopened}},
-	}, bson.M{"$set": bson.M{"status": models.TaskStatusResolved, "updated_at": now}})
+	if err = p.closeFixedPatterns(ctx, project, seen, profiles, now); err != nil {
+		return err
+	}
+	return RebalanceTasks(ctx, p.db, project.ID)
+}
+
+// DefaultTaskLimit is the size of the list when a project sets none.
+const DefaultTaskLimit = 25
+
+// RebalanceTasks lets the biggest waiting tasks onto the list while it has room.
+// Nothing leaves the list for a bigger task: work that was offered stays offered.
+func RebalanceTasks(ctx context.Context, db *mongo.Database, projectOID bson.ObjectID) error {
+	var project models.Project
+	if err := db.Collection("projects").FindOne(ctx, bson.M{"_id": projectOID}).Decode(&project); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil
+		}
+		return err
+	}
+	limit := project.TaskLimit
+	if limit <= 0 {
+		limit = DefaultTaskLimit
+	}
+	col := db.Collection("seo_tasks")
+	taken, err := col.CountDocuments(ctx, bson.M{
+		"project_id": projectOID,
+		"status":     bson.M{"$in": []models.TaskStatus{models.TaskStatusOpen, models.TaskStatusClaimed, models.TaskStatusReopened}},
+	})
+	if err != nil {
+		return err
+	}
+	room := int64(limit) - taken
+	if room <= 0 {
+		return nil
+	}
+	cursor, err := col.Find(ctx, bson.M{"project_id": projectOID, "status": models.TaskStatusQueued},
+		options.Find().SetSort(bson.D{{Key: "metrics.impressions", Value: -1}, {Key: "metrics.pages", Value: -1}, {Key: "_id", Value: 1}}).
+			SetLimit(room).SetProjection(bson.M{"_id": 1}))
+	if err != nil {
+		return err
+	}
+	var rows []struct {
+		ID bson.ObjectID `bson:"_id"`
+	}
+	if err = cursor.All(ctx, &rows); err != nil {
+		return err
+	}
+	ids := make([]bson.ObjectID, 0, len(rows))
+	for _, r := range rows {
+		ids = append(ids, r.ID)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err = col.UpdateMany(ctx, bson.M{"_id": bson.M{"$in": ids}}, bson.M{"$set": bson.M{"status": models.TaskStatusOpen}})
 	return err
+}
+
+// minRereadPages is how many reread pages have to look fixed for a pattern to
+// count as gone. A pattern can also drop out of detection by falling below its
+// threshold, which proves nothing.
+const minRereadPages = 3
+
+// missSpacing keeps two runs close together from counting as two sightings.
+const missSpacing = 20 * time.Hour
+
+func profileSnapshot(pr models.PageProfile) *models.PageSnapshot {
+	s := &models.PageSnapshot{
+		URL: pr.URL, SourceURL: pr.SourceURL, StatusCode: pr.StatusCode, Title: pr.Title,
+		MetaDescription: pr.MetaDescription, CategoryText: pr.CategoryText,
+	}
+	if pr.H1 != "" {
+		s.Headings = []models.PageHeading{{Level: 1, Text: pr.H1, Role: models.HeadingRoleContent}}
+	}
+	return s
+}
+
+// patternGoneOnReread reports whether enough of a task's pages were read since
+// its pattern was last seen, and all of them pass its checks.
+func patternGoneOnReread(t *models.SEOTask, byURL map[string]models.PageProfile) bool {
+	var snaps []*models.PageSnapshot
+	for _, page := range t.Pages {
+		pr, ok := byURL[normalizePageURL(page)]
+		if !ok || !pr.FetchedAt.After(t.LastSeenAt) {
+			continue
+		}
+		if t.Issue == models.IssueUnavailable && pr.Unavailable {
+			return false
+		}
+		snaps = append(snaps, profileSnapshot(pr))
+	}
+	need := minRereadPages
+	if len(t.Pages) < need {
+		need = len(t.Pages)
+	}
+	return need > 0 && len(snaps) >= need && len(evaluateChecks(t.Checks, snaps)) == 0
+}
+
+// closeFixedPatterns closes detected tasks whose pattern is gone in two runs.
+func (p *Processor) closeFixedPatterns(ctx context.Context, project *models.Project, seen []string, profiles []models.PageProfile, now time.Time) error {
+	cursor, err := p.db.Collection("seo_tasks").Find(ctx, bson.M{
+		"project_id": project.ID, "source": models.TaskSourceDetector, "key": bson.M{"$nin": seen},
+		"status": bson.M{"$in": []models.TaskStatus{models.TaskStatusQueued, models.TaskStatusOpen, models.TaskStatusReopened}},
+	})
+	if err != nil {
+		return err
+	}
+	var tasks []models.SEOTask
+	if err = cursor.All(ctx, &tasks); err != nil {
+		return err
+	}
+	byURL := make(map[string]models.PageProfile, len(profiles))
+	for _, pr := range profiles {
+		byURL[pr.URL] = pr
+	}
+	for i := range tasks {
+		t := &tasks[i]
+		if !patternGoneOnReread(t, byURL) || (t.LastMissAt != nil && now.Sub(*t.LastMissAt) < missSpacing) {
+			continue
+		}
+		set := bson.M{"miss_count": t.MissCount + 1, "last_miss_at": now}
+		if t.MissCount+1 >= 2 {
+			set = bson.M{"status": models.TaskStatusResolved, "updated_at": now}
+		}
+		if _, err = p.db.Collection("seo_tasks").UpdateOne(ctx, bson.M{"_id": t.ID}, bson.M{"$set": set}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // issueFamily maps a model's issue to the detector issues it describes, so
@@ -268,12 +435,13 @@ func issueFamily(issue string) []string {
 	return []string{issue}
 }
 
-// taskFor finds the active task already covering this suggestion's page.
-func taskFor(s models.Suggestion, tasks []models.SEOTask) int {
+// taskFor finds a task of the suggestion's problem on its page, among the tasks
+// that keep passes.
+func taskFor(s models.Suggestion, tasks []models.SEOTask, keep func(*models.SEOTask) bool) int {
 	key := normalizePageURL(s.Page)
 	for _, issue := range issueFamily(s.Issue) {
 		for i := range tasks {
-			if tasks[i].Issue != issue || !tasks[i].IsActive() {
+			if tasks[i].Issue != issue || !keep(&tasks[i]) {
 				continue
 			}
 			for _, page := range tasks[i].Pages {
@@ -302,7 +470,7 @@ func planMerge(suggestions []models.Suggestion, tasks []models.SEOTask) mergePla
 		if models.IsPageSpecificIssue(s.Issue) {
 			continue
 		}
-		if i := taskFor(s, tasks); i >= 0 {
+		if i := taskFor(s, tasks, (*models.SEOTask).IsActive); i >= 0 {
 			plan.Attach[i] = append(plan.Attach[i], s)
 			continue
 		}
@@ -477,11 +645,16 @@ func (p *Processor) mergeAnalysisFindings(ctx context.Context, project *models.P
 		if upErr != nil {
 			return upErr
 		}
+		// A finished task takes nothing silently: the finding goes to a reviewer,
+		// whose decision is the evidence for bringing the task back.
+		if !task.IsActive() && task.Status != models.TaskStatusDismissed {
+			continue
+		}
 		if err = p.coverSuggestions(ctx, list, task.ID, now); err != nil {
 			return err
 		}
 	}
-	return nil
+	return RebalanceTasks(ctx, p.db, project.ID)
 }
 
 func sortedInts[V any](m map[int]V) []int {
@@ -535,7 +708,7 @@ func (p *Processor) coverSuggestions(ctx context.Context, list []models.Suggesti
 	return err
 }
 
-// TaskFromSuggestion builds the task of one suggestion marked Apply on site.
+// TaskFromSuggestion builds the task of one accepted suggestion.
 func TaskFromSuggestion(s models.Suggestion, a *models.PageAnalysis, stats pageStat) models.SEOTask {
 	issue := s.Issue
 	if issue == "" {
@@ -711,7 +884,7 @@ func (p *Processor) HandleTaskVerify(ctx context.Context, t *asynq.Task) error {
 	}
 	now := time.Now().UTC()
 	if len(task.Checks) == 0 {
-		v := models.TaskVerification{At: now, Note: "This task cannot be checked from outside. A person reviews the result."}
+		v := models.TaskVerification{At: now, Note: "This task cannot be checked from outside. Confirm it once you have seen the result."}
 		_, err = col.UpdateOne(ctx, bson.M{"_id": id}, bson.M{"$set": bson.M{"verification": v, "updated_at": now}})
 		return err
 	}
@@ -735,11 +908,92 @@ func (p *Processor) HandleTaskVerify(ctx context.Context, t *asynq.Task) error {
 	}
 
 	failures := evaluateChecks(task.Checks, snaps)
-	status := models.TaskStatusVerified
-	if len(failures) > 0 {
-		status = models.TaskStatusReopened
-	}
 	v := models.TaskVerification{At: time.Now().UTC(), Checked: len(snaps), Failures: failures}
-	_, err = col.UpdateOne(ctx, bson.M{"_id": id}, bson.M{"$set": bson.M{"status": status, "verification": v, "updated_at": v.At}})
-	return err
+	set := bson.M{"status": models.TaskStatusVerified, "verification": v, "updated_at": v.At}
+	if len(failures) > 0 {
+		set["status"] = models.TaskStatusReopened
+		set["reopen_reason"] = fmt.Sprintf("The recheck after the task was reported done failed on %d of %d pages read: %s", len(failures), len(snaps), strings.Join(failures, "; "))
+	}
+	if _, err = col.UpdateOne(ctx, bson.M{"_id": id}, bson.M{"$set": set}); err != nil {
+		return err
+	}
+	return RebalanceTasks(ctx, p.db, task.ProjectID)
+}
+
+func findingKey(issue, kind, page string) string {
+	return taskKey(issue, kind, normalizePageURL(page))
+}
+
+// withoutRejected drops findings a person rejected, unless the page's reach has
+// doubled since. Only rejections are consulted, so nothing else is held back.
+func (p *Processor) withoutRejected(ctx context.Context, suggestions []models.Suggestion) []models.Suggestion {
+	out := suggestions[:0]
+	for _, s := range suggestions {
+		var rejected models.Suggestion
+		err := p.db.Collection("suggestions").FindOne(ctx, bson.M{
+			"project_id": s.ProjectID, "finding_key": s.FindingKey, "status": models.SuggestionStatusRejected,
+		}, options.FindOne().SetSort(bson.D{{Key: "updated_at", Value: -1}})).Decode(&rejected)
+		if errors.Is(err, mongo.ErrNoDocuments) || err != nil {
+			out = append(out, s)
+			continue
+		}
+		reach := PageStat(ctx, p.db, s.ProjectID, s.Page).Impressions
+		if rejected.RejectedImpressions > 0 && reach >= dismissedReturnFactor*rejected.RejectedImpressions {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// AcceptSuggestion records a person's decision to have a suggestion done. It
+// joins a task of that problem on that page, active or finished, or gets a task
+// of its own. A person's decision is evidence, so a finished task comes back.
+func AcceptSuggestion(ctx context.Context, db *mongo.Database, s models.Suggestion, value string, reviewer bson.ObjectID) (*models.SEOTask, error) {
+	now := time.Now().UTC()
+	s.FinalValue = value
+	var analysis *models.PageAnalysis
+	if s.AnalysisID != nil {
+		found, err := LoadAnalyses(ctx, db, []bson.ObjectID{*s.AnalysisID})
+		if err != nil {
+			return nil, err
+		}
+		if a, ok := found[*s.AnalysisID]; ok {
+			analysis = &a
+		}
+	}
+	draft := TaskFromSuggestion(s, analysis, PageStat(ctx, db, s.ProjectID, s.Page))
+
+	cursor, err := db.Collection("seo_tasks").Find(ctx, bson.M{"project_id": s.ProjectID})
+	if err != nil {
+		return nil, err
+	}
+	var tasks []models.SEOTask
+	if err = cursor.All(ctx, &tasks); err != nil {
+		return nil, err
+	}
+	i := taskFor(s, tasks, (*models.SEOTask).IsActive)
+	if i < 0 {
+		i = taskFor(s, tasks, func(*models.SEOTask) bool { return true })
+	}
+	var task *models.SEOTask
+	if i >= 0 {
+		t := tasks[i]
+		// The pattern's own wording and reach stay: the suggestion only adds to it.
+		draft.Title, draft.Problem, draft.Goal, draft.Confidence, draft.Metrics = t.Title, t.Problem, t.Goal, t.Confidence, t.Metrics
+		mergeIntoTask(&t, draft, time.Time{}, now)
+		if _, err = db.Collection("seo_tasks").ReplaceOne(ctx, bson.M{"_id": t.ID}, t); err != nil {
+			return nil, fmt.Errorf("update task: %w", err)
+		}
+		task = &t
+	} else if task, err = UpsertTask(ctx, db, draft, time.Time{}, now); err != nil {
+		return nil, err
+	}
+	_, err = db.Collection("suggestions").UpdateOne(ctx, bson.M{"_id": s.ID}, bson.M{"$set": bson.M{
+		"status": models.SuggestionStatusAccepted, "final_value": value, "task_id": task.ID,
+		"reviewed_by": reviewer, "updated_at": now,
+	}})
+	if err != nil {
+		return nil, err
+	}
+	return task, RebalanceTasks(ctx, db, s.ProjectID)
 }

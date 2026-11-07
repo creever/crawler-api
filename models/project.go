@@ -21,12 +21,6 @@ type Project struct {
 	GSCPropertyURL string `bson:"gsc_property_url" json:"gsc_property_url"`
 	// GSCServiceAccountJSON: full Google service account JSON key as a string.
 	GSCServiceAccountJSON string `bson:"gsc_service_account_json" json:"gsc_service_account_json"`
-	// Site adapter used to push approved changes to the target site.
-	// AdapterType: e.g. "cipomarket" (empty = no adapter configured).
-	AdapterType string `bson:"adapter_type"     json:"adapter_type"`
-	// AdapterEndpoint / AdapterAPIKey configure the adapter's target API.
-	AdapterEndpoint string `bson:"adapter_endpoint" json:"adapter_endpoint"`
-	AdapterAPIKey   string `bson:"adapter_api_key"  json:"adapter_api_key"`
 	// GA4PropertyID is the numeric GA4 property ID (e.g. "123456789"); uses the
 	// same service account as GSC with the analytics.readonly scope.
 	GA4PropertyID string `bson:"ga4_property_id"  json:"ga4_property_id"`
@@ -34,7 +28,10 @@ type Project struct {
 	// from each page's <html lang>.
 	Language string `bson:"language"  json:"language"`
 	// Currency labels GA4 revenue (e.g. "EUR"). Empty leaves it unlabelled.
-	Currency  string    `bson:"currency"  json:"currency"`
+	Currency string `bson:"currency"  json:"currency"`
+	// TaskLimit caps the tasks waiting for work at once; the rest stay on the
+	// watchlist until there is room. Zero means the default.
+	TaskLimit int       `bson:"task_limit" json:"task_limit"`
 	CreatedAt time.Time `bson:"created_at"       json:"created_at"`
 	UpdatedAt time.Time `bson:"updated_at"               json:"updated_at"`
 }
@@ -51,12 +48,10 @@ type ProjectUpdateInput struct {
 	GSCPropertyURL *string `bson:"gsc_property_url,omitempty" json:"gsc_property_url"`
 	// GSCServiceAccountJSON: full Google service account JSON key as a string.
 	GSCServiceAccountJSON *string   `bson:"gsc_service_account_json,omitempty" json:"gsc_service_account_json"`
-	AdapterType           *string   `bson:"adapter_type,omitempty"     json:"adapter_type"`
-	AdapterEndpoint       *string   `bson:"adapter_endpoint,omitempty" json:"adapter_endpoint"`
-	AdapterAPIKey         *string   `bson:"adapter_api_key,omitempty"  json:"adapter_api_key"`
 	GA4PropertyID         *string   `bson:"ga4_property_id,omitempty"  json:"ga4_property_id"`
 	Language              *string   `bson:"language,omitempty"         json:"language"`
 	Currency              *string   `bson:"currency,omitempty"         json:"currency"`
+	TaskLimit             *int      `bson:"task_limit,omitempty"       json:"task_limit"`
 	UpdatedAt             time.Time `bson:"updated_at"              json:"-"`
 }
 

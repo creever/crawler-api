@@ -35,9 +35,6 @@ const (
 	// after it has been covered.
 	groupAnalysesPerWindow = 6
 
-	// recentChangeWindow keeps a page out of bulk runs after a change was
-	// applied, so its impact can be measured.
-	recentChangeWindow = 28 * 24 * time.Hour
 	// unchangedPageWindow keeps an unchanged page out of bulk runs after it was
 	// analyzed.
 	unchangedPageWindow = 30 * 24 * time.Hour
@@ -272,7 +269,8 @@ func buildSuggestions(a *models.PageAnalysis, actions []analysisAction, target a
 		out = append(out, models.Suggestion{
 			ID: bson.NewObjectID(), ProjectID: a.ProjectID, OpportunityID: oppID, AnalysisID: &a.ID,
 			Kind: act.Kind, Issue: act.Issue, Scope: act.Scope, PageGroup: a.PageGroup,
-			Target: strings.TrimSpace(act.Target), Priority: priority, Effort: normalizeEffort(act.Effort),
+			FindingKey: findingKey(act.Issue, act.Kind, target.Page),
+			Target:     strings.TrimSpace(act.Target), Priority: priority, Effort: normalizeEffort(act.Effort),
 			EvidenceRefs: act.EvidenceRefs, Page: target.Page, Query: query, Language: a.Language,
 			CurrentValue: currentValue(act.Kind, snap), ProposedValue: act.Proposed,
 			Status: models.SuggestionStatusPending, Reason: strings.TrimSpace(act.Rationale),
@@ -377,11 +375,11 @@ func (p *Processor) storeAnalysis(ctx context.Context, a *models.PageAnalysis, s
 }
 
 // pageIsBusy reports whether a bulk run should leave a page alone: a reviewer
-// still has its suggestions, or a recent change is being measured.
-func (p *Processor) pageIsBusy(ctx context.Context, projectOID bson.ObjectID, page string, now time.Time) (bool, error) {
+// still has its suggestions, or a task on it is being done or measured.
+func (p *Processor) pageIsBusy(ctx context.Context, projectOID bson.ObjectID, page string) (bool, error) {
 	pending, err := p.db.Collection("suggestions").CountDocuments(ctx, bson.M{
-		"project_id": projectOID, "page": page,
-		"status": bson.M{"$in": []models.SuggestionStatus{models.SuggestionStatusPending, models.SuggestionStatusApplyOnSite}},
+		"project_id": projectOID, "page": page, "status": models.SuggestionStatusPending,
+		"issue": bson.M{"$exists": true},
 	}, options.Count().SetLimit(1))
 	if err != nil {
 		return false, err
@@ -389,14 +387,14 @@ func (p *Processor) pageIsBusy(ctx context.Context, projectOID bson.ObjectID, pa
 	if pending > 0 {
 		return true, nil
 	}
-	applied, err := p.db.Collection("applied_changes").CountDocuments(ctx, bson.M{
-		"project_id": projectOID, "page": page, "status": "applied",
-		"applied_at": bson.M{"$gte": now.Add(-recentChangeWindow)},
+	working, err := p.db.Collection("seo_tasks").CountDocuments(ctx, bson.M{
+		"project_id": projectOID, "pages": page,
+		"status": bson.M{"$in": []models.TaskStatus{models.TaskStatusClaimed, models.TaskStatusDone, models.TaskStatusVerified}},
 	}, options.Count().SetLimit(1))
 	if err != nil {
 		return false, err
 	}
-	return applied > 0, nil
+	return working > 0, nil
 }
 
 // groupOfPage returns a page's type. A page without a profile is read first, and
@@ -561,7 +559,7 @@ func (p *Processor) HandleSuggestionsGenerate(ctx context.Context, t *asynq.Task
 		}
 		now := time.Now().UTC()
 		if bulk {
-			busy, busyErr := p.pageIsBusy(ctx, projectOID, target.Page, now)
+			busy, busyErr := p.pageIsBusy(ctx, projectOID, target.Page)
 			if busyErr != nil {
 				return fmt.Errorf("check page state: %w", busyErr)
 			}
@@ -605,7 +603,7 @@ func (p *Processor) HandleSuggestionsGenerate(ctx context.Context, t *asynq.Task
 
 		a := outcome.Analysis
 		finishAnalysis(&a, projectOID, target, snap, provider, model, now)
-		suggestions := buildSuggestions(&a, outcome.Actions, target, snap, now)
+		suggestions := p.withoutRejected(ctx, buildSuggestions(&a, outcome.Actions, target, snap, now))
 		if err = p.storeAnalysis(ctx, &a, suggestions); err != nil {
 			p.logger.Warn("suggestions:generate store failed", zap.String("page", target.Page), zap.Error(err))
 			continue

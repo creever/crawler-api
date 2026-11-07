@@ -266,10 +266,84 @@ func TestRepeatedFindingUpdatesTheTask(t *testing.T) {
 
 func TestDismissedTaskStaysDismissed(t *testing.T) {
 	now := time.Now()
-	task := models.SEOTask{Status: models.TaskStatusDismissed, Title: "Old", Pages: []string{"a"}}
-	mergeIntoTask(&task, draftWith("a", "b"), now, now)
+	task := models.SEOTask{Status: models.TaskStatusDismissed, Title: "Old", Pages: []string{"a"}, DismissedImpressions: 100}
+	d := draftWith("a", "b")
+	d.Metrics.Impressions = 150
+	mergeIntoTask(&task, d, now, now)
 	if task.Status != models.TaskStatusDismissed || task.Title != "Old" {
+		t.Fatalf("a little growth must not bring it back: %+v", task)
+	}
+	d.Metrics.Impressions = 200
+	mergeIntoTask(&task, d, now, now)
+	if task.Status != models.TaskStatusReopened || !strings.Contains(task.ReopenReason, "dismissed at 100") {
+		t.Fatalf("twice the reach must bring it back: %+v", task)
+	}
+}
+
+func TestFinishedTaskIgnoresAnAIRepeatingItself(t *testing.T) {
+	now := time.Now()
+	for _, status := range []models.TaskStatus{models.TaskStatusDone, models.TaskStatusVerified, models.TaskStatusClosed} {
+		task := models.SEOTask{Status: status, DoneAt: &now, Title: "Old"}
+		d := draftWith("a")
+		d.Source = models.TaskSourceAnalysis
+		mergeIntoTask(&task, d, time.Time{}, now.Add(time.Hour))
+		if task.Status != status || task.Title != "Old" {
+			t.Fatalf("%s: %+v", status, task)
+		}
+	}
+}
+
+func TestAReviewerBringsAFinishedTaskBack(t *testing.T) {
+	now := time.Now()
+	task := models.SEOTask{Status: models.TaskStatusClosed, DoneAt: &now}
+	d := draftWith("a")
+	d.Source = models.TaskSourceReview
+	mergeIntoTask(&task, d, time.Time{}, now)
+	if task.Status != models.TaskStatusReopened || task.ReopenReason == "" {
 		t.Fatalf("task: %+v", task)
+	}
+	proposed := models.SEOTask{Status: models.TaskStatusProposed}
+	mergeIntoTask(&proposed, d, time.Time{}, now)
+	if proposed.Status != models.TaskStatusOpen {
+		t.Fatal("accepting a finding of a proposed task approves that task")
+	}
+}
+
+func TestTasksStartByTheirSource(t *testing.T) {
+	for source, want := range map[string]models.TaskStatus{
+		models.TaskSourceDetector: models.TaskStatusQueued,
+		models.TaskSourceAnalysis: models.TaskStatusProposed,
+		models.TaskSourceReview:   models.TaskStatusOpen,
+	} {
+		if got := initialTaskStatus(source); got != want {
+			t.Errorf("%s starts as %s", source, got)
+		}
+	}
+}
+
+func TestPatternIsGoneOnlyOnRereadPages(t *testing.T) {
+	seen := time.Now()
+	pages := []string{"https://x.example/a", "https://x.example/b", "https://x.example/c", "https://x.example/d"}
+	task := &models.SEOTask{Pages: pages, LastSeenAt: seen, Checks: []models.TaskCheck{{Type: models.CheckNotEmpty, Field: "title"}}}
+	byURL := make(map[string]models.PageProfile)
+	for i, page := range pages[:3] {
+		pr := profile(page, "product", fmt.Sprintf("T%d", i), "")
+		pr.FetchedAt = seen.Add(time.Hour)
+		byURL[pr.URL] = pr
+	}
+	if !patternGoneOnReread(task, byURL) {
+		t.Fatal("three fixed reread pages show the pattern is gone")
+	}
+	stale := byURL[normalizePageURL(pages[2])]
+	stale.FetchedAt = seen.Add(-time.Hour)
+	byURL[stale.URL] = stale
+	if patternGoneOnReread(task, byURL) {
+		t.Fatal("a pattern that only fell below its threshold proves nothing")
+	}
+	stale.FetchedAt, stale.Title = seen.Add(time.Hour), ""
+	byURL[stale.URL] = stale
+	if patternGoneOnReread(task, byURL) {
+		t.Fatal("a reread page still showing it keeps the task open")
 	}
 }
 
@@ -400,5 +474,104 @@ func TestAssetsAreNoPages(t *testing.T) {
 		if sampleableURL(u, "https://x.example") {
 			t.Errorf("%s must not be sampled", u)
 		}
+	}
+}
+
+func day(s string) time.Time {
+	d, err := time.Parse(dayLayout, s)
+	if err != nil {
+		panic(err)
+	}
+	return d
+}
+
+func TestImpactWindowsCompareLikeWithLike(t *testing.T) {
+	before, after := impactWindows(day("2026-10-01").Add(15*time.Hour), day("2026-10-20"))
+	if before.Start != day("2026-09-03") || before.End != day("2026-09-30") || before.days() != 28 {
+		t.Fatalf("before: %v", before)
+	}
+	if after.Start != day("2026-10-06") || after.End != day("2026-10-20") || after.days() != 15 {
+		t.Fatalf("after: %v", after)
+	}
+	// Search data lags: the days it does not have yet must stay out of the window.
+	before, after = impactWindows(day("2026-10-01"), day("2026-09-28"))
+	if before.End != day("2026-09-28") || before.days() != 28 || after.days() != 0 {
+		t.Fatalf("before %v after %v", before, after)
+	}
+}
+
+func TestPartialWindowIsNoFall(t *testing.T) {
+	before := windowTotals{Clicks: 280}
+	after := windowTotals{Clicks: 60}
+	if got := relativeChange(before, 28, after, 5); got < 0.19 || got > 0.21 {
+		t.Fatalf("10 clicks a day growing to 12 is +20%%, got %v", got)
+	}
+}
+
+func TestImpactVerdict(t *testing.T) {
+	cases := []struct {
+		days    int
+		clicks  float64
+		change  float64
+		kind    string
+		control float64
+		want    string
+	}{
+		{20, 900, 0.5, models.ControlPageType, 0, models.VerdictMeasuring},
+		{28, 10, 0.5, models.ControlPageType, 0, models.VerdictInconclusive},
+		{28, 900, 0.5, models.ControlNone, 0, models.VerdictInconclusive},
+		{28, 900, 0.2, models.ControlPageType, 0.05, models.VerdictImproved},
+		{28, 900, 0.2, models.ControlLastYear, 0.25, models.VerdictNoChange},
+		{28, 900, -0.2, models.ControlPageType, -0.15, models.VerdictNoChange},
+		{28, 900, 0.1, models.ControlPageType, 0.3, models.VerdictWorse},
+	}
+	for _, c := range cases {
+		if got := impactVerdict(c.days, c.clicks, c.change, c.kind, c.control); got != c.want {
+			t.Errorf("%+v: got %s", c, got)
+		}
+	}
+}
+
+func TestVerdictsMoveTasks(t *testing.T) {
+	improved := &models.SEOTask{Status: models.TaskStatusVerified}
+	applyVerdict(improved, models.VerdictImproved)
+	if improved.Status != models.TaskStatusClosed {
+		t.Fatal("what helped closes")
+	}
+	flat := &models.SEOTask{Status: models.TaskStatusVerified}
+	applyVerdict(flat, models.VerdictNoChange)
+	if flat.Status != models.TaskStatusReopened || flat.ImpactReopens != 1 || flat.ReopenReason == "" {
+		t.Fatalf("what did not help returns once: %+v", flat)
+	}
+	flat.Status = models.TaskStatusVerified
+	applyVerdict(flat, models.VerdictWorse)
+	if flat.Status != models.TaskStatusClosed {
+		t.Fatal("a second attempt must not loop")
+	}
+	measuring := &models.SEOTask{Status: models.TaskStatusVerified}
+	applyVerdict(measuring, models.VerdictMeasuring)
+	if measuring.Status != models.TaskStatusVerified {
+		t.Fatal("a measurement in progress decides nothing")
+	}
+	unconfirmed := &models.SEOTask{Status: models.TaskStatusDone}
+	applyVerdict(unconfirmed, models.VerdictNoChange)
+	if unconfirmed.Status != models.TaskStatusDone {
+		t.Fatal("a task nobody confirmed is not judged")
+	}
+}
+
+func TestTopMovesKeepsBothEnds(t *testing.T) {
+	before := map[string]float64{"a": 280, "b": 280, "c": 280, "d": 280, "e": 280, "f": 280, "g": 280, "h": 280}
+	after := map[string]float64{"a": 560, "b": 500, "c": 400, "d": 290, "e": 280, "f": 200, "g": 100, "h": 0}
+	moves := topMoves(before, 28, after, 28)
+	if len(moves) != 6 || moves[0].Page != "a" || moves[5].Page != "h" {
+		t.Fatalf("moves: %+v", moves)
+	}
+}
+
+func TestBriefExplainsAReturn(t *testing.T) {
+	task := models.SEOTask{Title: "T", ReopenReason: "The recheck failed."}
+	if !strings.Contains(task.Brief(), "Why this came back") {
+		t.Fatal("a harness must see why a task returned")
 	}
 }

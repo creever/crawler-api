@@ -10,17 +10,32 @@ import (
 type SuggestionStatus string
 
 const (
-	SuggestionStatusPending  SuggestionStatus = "pending"
-	SuggestionStatusApproved SuggestionStatus = "approved"
+	SuggestionStatusPending SuggestionStatus = "pending"
+	// SuggestionStatusAccepted means a person wants this done: the suggestion
+	// has a task, its own or one it joined.
+	SuggestionStatusAccepted SuggestionStatus = "accepted"
 	SuggestionStatusRejected SuggestionStatus = "rejected"
-	SuggestionStatusEdited   SuggestionStatus = "edited" // approved with manual edits
-	// SuggestionStatusApplyOnSite marks a decided suggestion for the site. It
-	// changes nothing by itself: a task can be created from it later.
-	SuggestionStatusApplyOnSite SuggestionStatus = "apply_on_site"
-	// SuggestionStatusCovered means a task for several pages holds this
-	// suggestion, so it left the review queue.
+	// SuggestionStatusCovered means a task for several pages took the suggestion
+	// over, so no one has to decide on it page by page.
 	SuggestionStatusCovered SuggestionStatus = "covered"
 )
+
+// Reasons a reviewer can give for rejecting a suggestion.
+const (
+	RejectReasonWrong      = "not_true"
+	RejectReasonFixed      = "already_fixed"
+	RejectReasonIntended   = "intentional"
+	RejectReasonNotWorthIt = "not_worth_it"
+)
+
+// IsRejectReason reports whether reason is empty or a known one.
+func IsRejectReason(reason string) bool {
+	switch reason {
+	case "", RejectReasonWrong, RejectReasonFixed, RejectReasonIntended, RejectReasonNotWorthIt:
+		return true
+	}
+	return false
+}
 
 // Suggestion kinds.
 const (
@@ -75,6 +90,13 @@ type Suggestion struct {
 	Issue     string `bson:"issue,omitempty"      json:"issue,omitempty"`
 	Scope     string `bson:"scope,omitempty"      json:"scope,omitempty"` // page | page_type
 	PageGroup string `bson:"page_group,omitempty" json:"page_group,omitempty"`
+	// FindingKey identifies what the suggestion is about across runs, so that a
+	// rejected finding stays rejected.
+	FindingKey string `bson:"finding_key,omitempty" json:"finding_key,omitempty"`
+	// RejectReason and RejectedImpressions record a rejection: the same finding
+	// only returns once the page has twice this reach.
+	RejectReason        string  `bson:"reject_reason,omitempty"        json:"reject_reason,omitempty"`
+	RejectedImpressions float64 `bson:"rejected_impressions,omitempty" json:"rejected_impressions,omitempty"`
 	// TaskID is the task holding this suggestion, if any.
 	TaskID *bson.ObjectID `bson:"task_id,omitempty" json:"task_id,omitempty"`
 	Effort string         `bson:"effort,omitempty"   json:"effort,omitempty"` // S | M | L
@@ -85,8 +107,7 @@ type Suggestion struct {
 	Language      string   `bson:"language"         json:"language"` // e.g. "hu"
 	CurrentValue  string   `bson:"current_value"    json:"current_value"`
 	ProposedValue string   `bson:"proposed_value"   json:"proposed_value"`
-	// FinalValue is what gets applied: ProposedValue on approve, or the
-	// edited text when the reviewer modified it (status "edited").
+	// FinalValue is the accepted text: ProposedValue, or the reviewer's edit.
 	FinalValue string           `bson:"final_value"     json:"final_value"`
 	Status     SuggestionStatus `bson:"status"           json:"status"`
 	Reason     string           `bson:"reason"           json:"reason"`
@@ -94,8 +115,6 @@ type Suggestion struct {
 	Prompt      string         `bson:"prompt"           json:"prompt"`
 	RawResponse string         `bson:"raw_response"     json:"raw_response"`
 	ReviewedBy  *bson.ObjectID `bson:"reviewed_by,omitempty" json:"reviewed_by,omitempty"`
-	// AppliedAt is set on suggestions pushed through the former site adapters.
-	AppliedAt *time.Time `bson:"applied_at,omitempty" json:"applied_at,omitempty"`
-	CreatedAt time.Time  `bson:"created_at"       json:"created_at"`
-	UpdatedAt time.Time  `bson:"updated_at"       json:"updated_at"`
+	CreatedAt   time.Time      `bson:"created_at"       json:"created_at"`
+	UpdatedAt   time.Time      `bson:"updated_at"       json:"updated_at"`
 }

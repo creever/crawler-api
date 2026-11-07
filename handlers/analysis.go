@@ -28,7 +28,7 @@ func NewAnalysisHandler(db *mongo.Database) *AnalysisHandler {
 // analysisView is an analysis with the suggestions it produced.
 type analysisView struct {
 	models.PageAnalysis `bson:",inline"`
-	Suggestions         []models.Suggestion `json:"suggestions"`
+	Suggestions         []suggestionView `json:"suggestions"`
 }
 
 // projectExists writes the error response and returns false when the caller
@@ -53,7 +53,7 @@ func (h *AnalysisHandler) withSuggestions(ctx context.Context, projectID bson.Ob
 	for i, a := range analyses {
 		ids = append(ids, a.ID)
 		index[a.ID] = i
-		views = append(views, analysisView{PageAnalysis: a, Suggestions: []models.Suggestion{}})
+		views = append(views, analysisView{PageAnalysis: a, Suggestions: []suggestionView{}})
 	}
 	if len(ids) == 0 {
 		return views, nil
@@ -70,7 +70,11 @@ func (h *AnalysisHandler) withSuggestions(ctx context.Context, projectID bson.Ob
 	if err = cursor.All(ctx, &suggestions); err != nil {
 		return nil, err
 	}
-	for _, s := range suggestions {
+	linked, err := withTaskRefs(ctx, h.db, suggestions)
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range linked {
 		if s.AnalysisID == nil {
 			continue
 		}

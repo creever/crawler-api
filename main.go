@@ -19,7 +19,6 @@ import (
 	"github.com/creever/crawler-api/worker"
 )
 
-
 func main() {
 	cfg := config.Load()
 
@@ -66,6 +65,7 @@ func main() {
 	worker.StartOpportunityScheduler(database, asynqClient, logger)
 	worker.StartSuggestionScheduler(database, asynqClient, logger)
 	worker.StartGA4Scheduler(database, asynqClient, logger)
+	worker.StartTaskMeasureScheduler(database, asynqClient, logger)
 
 	// GIN
 	gin.SetMode(cfg.GinMode)

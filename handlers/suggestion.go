@@ -35,7 +35,7 @@ func NewSuggestionHandler(db *mongo.Database, asynqClient *asynq.Client, inspect
 // @Tags         projects
 // @Produce      json
 // @Param        id      path  string  true  "Project ID"
-// @Param        status  query string  false "Filter by status (pending, approved, rejected, edited)"
+// @Param        status  query string  false "Filter by status (pending, accepted, rejected, covered)"
 // @Success      200  {array}  models.Suggestion
 // @Router       /api/v1/projects/{id}/suggestions [get]
 func (h *SuggestionHandler) List(c *gin.Context) {
@@ -75,10 +75,12 @@ func (h *SuggestionHandler) List(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode suggestions"})
 		return
 	}
-	if suggestions == nil {
-		suggestions = []models.Suggestion{}
+	views, err := withTaskRefs(ctx, h.db, suggestions)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch tasks"})
+		return
 	}
-	c.JSON(http.StatusOK, suggestions)
+	c.JSON(http.StatusOK, views)
 }
 
 // Generate godoc
@@ -129,13 +131,14 @@ func (h *SuggestionHandler) Generate(c *gin.Context) {
 }
 
 // Review godoc
-// @Summary      Approve, reject or edit a suggestion
+// @Summary      Accept or reject a suggestion
+// @Description  Accepting creates a task, or joins one of the same problem on that page.
 // @Tags         projects
 // @Accept       json
 // @Produce      json
 // @Param        id     path  string  true  "Project ID"
 // @Param        sid    path  string  true  "Suggestion ID"
-// @Param        review body  object  true  "Review action: {action: approve|reject|edit, value?: string}"
+// @Param        review body  object  true  "Review: {action: accept|reject, value?: string, reason?: string}"
 // @Success      200  {object}  models.Suggestion
 // @Router       /api/v1/projects/{id}/suggestions/{sid}/review [patch]
 func (h *SuggestionHandler) Review(c *gin.Context) {
@@ -151,11 +154,16 @@ func (h *SuggestionHandler) Review(c *gin.Context) {
 	}
 
 	var input struct {
-		Action string `json:"action" binding:"required"` // approve | reject | edit
-		Value  string `json:"value"`                     // new text when action=edit
+		Action string `json:"action" binding:"required"` // accept | reject
+		Value  string `json:"value"`                     // the reviewer's text, if edited
+		Reason string `json:"reason"`                    // why it was rejected, optional
 	}
 	if err = c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !models.IsRejectReason(input.Reason) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unknown rejection reason"})
 		return
 	}
 
@@ -181,46 +189,46 @@ func (h *SuggestionHandler) Review(c *gin.Context) {
 		return
 	}
 
-	update := bson.M{
-		"updated_at":  time.Now().UTC(),
-		"reviewed_by": middleware.GetUserID(c),
-	}
-
-	switch input.Action {
-	case "approve":
-		update["status"] = models.SuggestionStatusApproved
-		update["final_value"] = existing.ProposedValue
-	case "reject":
-		update["status"] = models.SuggestionStatusRejected
-	case "edit":
-		if input.Value == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "value is required for edit"})
-			return
-		}
-		update["status"] = models.SuggestionStatusEdited
-		update["final_value"] = input.Value
-	default:
-		c.JSON(http.StatusBadRequest, gin.H{"error": "action must be approve, reject or edit"})
+	if existing.Status != models.SuggestionStatusPending {
+		c.JSON(http.StatusConflict, gin.H{"error": "this suggestion was already decided (status: " + string(existing.Status) + ")"})
 		return
 	}
 
-	result := h.db.Collection("suggestions").FindOneAndUpdate(
-		ctx,
-		bson.M{"_id": sid, "project_id": id},
-		bson.M{"$set": update},
-		options.FindOneAndUpdate().SetReturnDocument(options.After),
-	)
-	if result.Err() != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update suggestion"})
+	switch input.Action {
+	case "accept":
+		value := input.Value
+		if value == "" {
+			value = existing.ProposedValue
+		}
+		if _, err = worker.AcceptSuggestion(ctx, h.db, existing, value, middleware.GetUserID(c)); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to accept suggestion"})
+			return
+		}
+	case "reject":
+		_, err = h.db.Collection("suggestions").UpdateOne(ctx, bson.M{"_id": sid, "project_id": id}, bson.M{"$set": bson.M{
+			"status": models.SuggestionStatusRejected, "reject_reason": input.Reason, "reviewed_by": middleware.GetUserID(c),
+			"rejected_impressions": worker.PageStat(ctx, h.db, id, existing.Page).Impressions, "updated_at": time.Now().UTC(),
+		}})
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update suggestion"})
+			return
+		}
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "action must be accept or reject"})
 		return
 	}
 
 	var suggestion models.Suggestion
-	if err = result.Decode(&suggestion); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode suggestion"})
+	if err = h.db.Collection("suggestions").FindOne(ctx, bson.M{"_id": sid}).Decode(&suggestion); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch suggestion"})
 		return
 	}
-	c.JSON(http.StatusOK, suggestion)
+	views, err := withTaskRefs(ctx, h.db, []models.Suggestion{suggestion})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch its task"})
+		return
+	}
+	c.JSON(http.StatusOK, views[0])
 }
 
 func parsePositiveInt(s string) (int, error) {

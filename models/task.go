@@ -12,12 +12,15 @@ import (
 type TaskStatus string
 
 const (
-	TaskStatusOpen      TaskStatus = "open"
+	TaskStatusProposed  TaskStatus = "proposed"  // an AI conclusion waiting for a person
+	TaskStatusQueued    TaskStatus = "queued"    // on the watchlist until there is room
+	TaskStatusOpen      TaskStatus = "open"      // ready for a harness
 	TaskStatusClaimed   TaskStatus = "claimed"   // a harness is working on it
-	TaskStatusDone      TaskStatus = "done"      // the harness reports it deployed
-	TaskStatusVerified  TaskStatus = "verified"  // a recrawl confirmed the fix
-	TaskStatusReopened  TaskStatus = "reopened"  // a recrawl found it unfixed
-	TaskStatusResolved  TaskStatus = "resolved"  // the pattern disappeared by itself
+	TaskStatusDone      TaskStatus = "done"      // reported live, not confirmed yet
+	TaskStatusVerified  TaskStatus = "verified"  // confirmed live, its effect is being measured
+	TaskStatusClosed    TaskStatus = "closed"    // measured and finished
+	TaskStatusReopened  TaskStatus = "reopened"  // came back, see ReopenReason
+	TaskStatusResolved  TaskStatus = "resolved"  // reread pages no longer show the problem
 	TaskStatusDismissed TaskStatus = "dismissed" // a person decided not to do it
 )
 
@@ -147,6 +150,56 @@ type TaskVerification struct {
 	Note     string    `bson:"note,omitempty"     json:"note,omitempty"`
 }
 
+// Outcomes of measuring a task.
+const (
+	VerdictMeasuring    = "measuring"
+	VerdictImproved     = "improved"
+	VerdictNoChange     = "no_change"
+	VerdictWorse        = "worse"
+	VerdictInconclusive = "inconclusive" // too little traffic, or nothing to compare with
+)
+
+// Comparison groups.
+const (
+	ControlPageType = "page_type" // unaffected pages of the same type
+	ControlLastYear = "last_year" // the same pages a year earlier
+	ControlNone     = "none"
+)
+
+// DailyMetrics is an average search day of a task's pages.
+type DailyMetrics struct {
+	Clicks      float64 `bson:"clicks"      json:"clicks"`
+	Impressions float64 `bson:"impressions" json:"impressions"`
+	CTR         float64 `bson:"ctr"         json:"ctr"`
+	Position    float64 `bson:"position"    json:"position"`
+}
+
+// PageMove is one page's change in clicks per day.
+type PageMove struct {
+	Page   string  `bson:"page"   json:"page"`
+	Before float64 `bson:"before" json:"before"`
+	After  float64 `bson:"after"  json:"after"`
+}
+
+// TaskMeasurement compares a task's pages before and after the change went
+// live, and against a group that did not change.
+type TaskMeasurement struct {
+	UpdatedAt   time.Time    `bson:"updated_at"   json:"updated_at"`
+	BeforeStart string       `bson:"before_start" json:"before_start"`
+	BeforeEnd   string       `bson:"before_end"   json:"before_end"`
+	AfterStart  string       `bson:"after_start"  json:"after_start"`
+	AfterEnd    string       `bson:"after_end"    json:"after_end"`
+	AfterDays   int          `bson:"after_days"   json:"after_days"`
+	Before      DailyMetrics `bson:"before"       json:"before"`
+	After       DailyMetrics `bson:"after"        json:"after"`
+	// ClicksChange and ControlChange are fractions: 0.12 means 12% up.
+	ClicksChange  float64    `bson:"clicks_change"  json:"clicks_change"`
+	ControlKind   string     `bson:"control_kind"   json:"control_kind"`
+	ControlChange float64    `bson:"control_change" json:"control_change"`
+	Verdict       string     `bson:"verdict"        json:"verdict"`
+	Movers        []PageMove `bson:"movers"         json:"movers"`
+}
+
 // SEOTask is one unit of work for an implementing harness: one problem, however
 // many pages it touches. Key stays the same across runs, so a repeated finding
 // updates the task instead of creating another.
@@ -182,14 +235,31 @@ type SEOTask struct {
 	DoneAt       *time.Time        `bson:"done_at,omitempty"      json:"done_at,omitempty"`
 	DoneSummary  string            `bson:"done_summary,omitempty" json:"done_summary,omitempty"`
 	Verification *TaskVerification `bson:"verification,omitempty" json:"verification,omitempty"`
-	LastSeenAt   time.Time         `bson:"last_seen_at"           json:"last_seen_at"`
-	CreatedAt    time.Time         `bson:"created_at"             json:"created_at"`
-	UpdatedAt    time.Time         `bson:"updated_at"             json:"updated_at"`
+	Measurement  *TaskMeasurement  `bson:"measurement,omitempty"  json:"measurement,omitempty"`
+	// ReopenReason tells why the task came back. ImpactReopens counts returns for
+	// lack of effect: one is enough, a second attempt would not end.
+	ReopenReason  string `bson:"reopen_reason,omitempty" json:"reopen_reason,omitempty"`
+	ImpactReopens int    `bson:"impact_reopens,omitempty" json:"impact_reopens,omitempty"`
+	// DismissedImpressions is the reach at dismissal: the task only returns at
+	// twice that.
+	DismissedImpressions float64 `bson:"dismissed_impressions,omitempty" json:"dismissed_impressions,omitempty"`
+	// MissCount and LastMissAt count the runs in which reread pages no longer
+	// showed the pattern. One run could be chance, so two close the task.
+	MissCount  int        `bson:"miss_count,omitempty"   json:"-"`
+	LastMissAt *time.Time `bson:"last_miss_at,omitempty" json:"-"`
+	LastSeenAt time.Time  `bson:"last_seen_at"           json:"last_seen_at"`
+	CreatedAt  time.Time  `bson:"created_at"             json:"created_at"`
+	UpdatedAt  time.Time  `bson:"updated_at"             json:"updated_at"`
 }
 
-// IsActive reports whether a harness can still act on the task.
+// IsActive reports whether the task is still ahead of the work: a finding can
+// join it and update it.
 func (t *SEOTask) IsActive() bool {
-	return t.Status == TaskStatusOpen || t.Status == TaskStatusClaimed || t.Status == TaskStatusReopened
+	switch t.Status {
+	case TaskStatusProposed, TaskStatusQueued, TaskStatusOpen, TaskStatusClaimed, TaskStatusReopened:
+		return true
+	}
+	return false
 }
 
 const briefPages = 20
@@ -205,6 +275,9 @@ func (t *SEOTask) Brief() string {
 	}
 	b.WriteString("The change should fit the codebase; the examples show intent, not exact code.\n")
 
+	if t.ReopenReason != "" {
+		fmt.Fprintf(&b, "\n## Why this came back\n%s\n", t.ReopenReason)
+	}
 	fmt.Fprintf(&b, "\n## Problem\n%s\n", t.Problem)
 	fmt.Fprintf(&b, "\n## Goal\n%s\n", t.Goal)
 	fmt.Fprintf(&b, "\n## Reach\n%d pages may be affected, out of %d pages read on the site so far. The problem was confirmed on %d of them", t.Metrics.Pages, t.Metrics.PagesSampled, len(t.ConfirmedPages))

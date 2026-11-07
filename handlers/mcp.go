@@ -100,7 +100,7 @@ var mcpTools = []mcpTool{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"project_id": map[string]interface{}{"type": "string", "description": "Project ID"},
-				"status":     map[string]interface{}{"type": "string", "description": "open, claimed, done, verified, reopened, resolved or dismissed. Default: open"},
+				"status":     map[string]interface{}{"type": "string", "description": "proposed, queued, open, claimed, done, verified, closed, reopened, resolved or dismissed. Default: the tasks ready for work, open and reopened"},
 				"limit":      map[string]interface{}{"type": "integer", "description": "Max tasks (default 20)"},
 			},
 			"required": []string{"project_id"},
@@ -475,11 +475,11 @@ func (h *MCPHandler) toolListTasks(ctx context.Context, args map[string]interfac
 	if errMsg != "" {
 		return nil, errMsg
 	}
-	status, _ := args["status"].(string)
-	if status == "" {
-		status = string(models.TaskStatusOpen)
+	query := bson.M{"project_id": oid, "status": bson.M{"$in": []models.TaskStatus{models.TaskStatusOpen, models.TaskStatusReopened}}}
+	if status, _ := args["status"].(string); status != "" {
+		query["status"] = models.TaskStatus(status)
 	}
-	tasks, err := listTasks(ctx, h.db, oid, status, int64(argInt(args, "limit", 20)))
+	tasks, err := listTasks(ctx, h.db, query, int64(argInt(args, "limit", 20)))
 	if err != nil {
 		return nil, err.Error()
 	}
@@ -502,7 +502,7 @@ func (h *MCPHandler) toolGetTask(ctx context.Context, args map[string]interface{
 	if err := h.db.Collection("seo_tasks").FindOne(ctx, filter).Decode(&t); err != nil {
 		return nil, "task not found"
 	}
-	return gin.H{"task_id": t.ID.Hex(), "status": t.Status, "brief": t.Brief(), "pages": t.Pages, "checks": t.Checks, "verification": t.Verification}, ""
+	return gin.H{"task_id": t.ID.Hex(), "status": t.Status, "brief": t.Brief(), "pages": t.Pages, "checks": t.Checks, "verification": t.Verification, "measurement": t.Measurement}, ""
 }
 
 func (h *MCPHandler) toolClaimTask(ctx context.Context, args map[string]interface{}) (interface{}, string) {

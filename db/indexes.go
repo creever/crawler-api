@@ -69,10 +69,20 @@ func EnsureIndexes(database *mongo.Database, logger *zap.Logger) {
 		Options: options.Index().SetName("seo_tasks_project_status_impressions"),
 	})
 
-	// applied_changes: a task logs one change per page
-	create("applied_changes", mongo.IndexModel{
-		Keys:    bson.D{{Key: "task_id", Value: 1}, {Key: "page", Value: 1}},
-		Options: options.Index().SetName("applied_changes_task_page"),
+	// seo_tasks: finished tasks per project, and the tasks a page belongs to
+	create("seo_tasks", mongo.IndexModel{
+		Keys:    bson.D{{Key: "project_id", Value: 1}, {Key: "done_at", Value: -1}},
+		Options: options.Index().SetName("seo_tasks_project_done"),
+	})
+	create("seo_tasks", mongo.IndexModel{
+		Keys:    bson.D{{Key: "project_id", Value: 1}, {Key: "pages", Value: 1}},
+		Options: options.Index().SetName("seo_tasks_project_pages"),
+	})
+
+	// suggestions: earlier decisions on a finding
+	create("suggestions", mongo.IndexModel{
+		Keys:    bson.D{{Key: "project_id", Value: 1}, {Key: "finding_key", Value: 1}},
+		Options: options.Index().SetName("suggestions_project_finding"),
 	})
 
 	// gsc_rows: unique row per project × query × page × date × device (upsert key)
@@ -186,34 +196,6 @@ func EnsureIndexes(database *mongo.Database, logger *zap.Logger) {
 	create("suggestion_runs", mongo.IndexModel{
 		Keys:    bson.D{{Key: "project_id", Value: 1}},
 		Options: options.Index().SetUnique(true).SetName("suggestion_runs_project_unique"),
-	})
-
-	// applied_changes: recent changes per page (analysis skip rules)
-	create("applied_changes", mongo.IndexModel{
-		Keys: bson.D{
-			{Key: "project_id", Value: 1},
-			{Key: "page", Value: 1},
-			{Key: "applied_at", Value: -1},
-		},
-		Options: options.Index().SetName("applied_changes_project_page_date"),
-	})
-
-	// applied_changes: per-project impact listing
-	create("applied_changes", mongo.IndexModel{
-		Keys: bson.D{
-			{Key: "project_id", Value: 1},
-			{Key: "applied_at", Value: -1},
-		},
-		Options: options.Index().SetName("applied_changes_project_date"),
-	})
-
-	// applied_changes: per-page lookup
-	create("applied_changes", mongo.IndexModel{
-		Keys: bson.D{
-			{Key: "project_id", Value: 1},
-			{Key: "page", Value: 1},
-		},
-		Options: options.Index().SetName("applied_changes_project_page"),
 	})
 
 	// ga4_rows: unique row per project × page × date (upsert key)

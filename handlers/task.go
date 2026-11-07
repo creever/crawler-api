@@ -16,14 +16,69 @@ import (
 	"github.com/creever/crawler-api/worker"
 )
 
-// maxImpactPages caps the before-snapshots a task records. Each one is an
-// aggregate over the page's search rows.
-const maxImpactPages = 20
+// taskSuggestion is a suggestion as listed on its task.
+type taskSuggestion struct {
+	ID     bson.ObjectID           `json:"id"`
+	Page   string                  `json:"page"`
+	Kind   string                  `json:"kind"`
+	Status models.SuggestionStatus `json:"status"`
+}
 
-// taskView is a task with the brief a harness works from.
+// taskView is a task with the brief a harness works from and its suggestions.
 type taskView struct {
 	models.SEOTask
-	Brief string `json:"brief"`
+	Brief       string           `json:"brief"`
+	Suggestions []taskSuggestion `json:"suggestions"`
+}
+
+// taskRef is what a suggestion shows of its task.
+type taskRef struct {
+	ID     bson.ObjectID     `json:"id"`
+	Title  string            `json:"title"`
+	Status models.TaskStatus `json:"status"`
+	Scope  string            `json:"scope"`
+	Pages  int               `json:"pages"`
+}
+
+// suggestionView is a suggestion with the current state of its task.
+type suggestionView struct {
+	models.Suggestion
+	Task *taskRef `json:"task,omitempty"`
+}
+
+// withTaskRefs adds to each suggestion the live state of its task.
+func withTaskRefs(ctx context.Context, db *mongo.Database, suggestions []models.Suggestion) ([]suggestionView, error) {
+	views := make([]suggestionView, 0, len(suggestions))
+	var ids []bson.ObjectID
+	for _, s := range suggestions {
+		views = append(views, suggestionView{Suggestion: s})
+		if s.TaskID != nil {
+			ids = append(ids, *s.TaskID)
+		}
+	}
+	if len(ids) == 0 {
+		return views, nil
+	}
+	cursor, err := db.Collection("seo_tasks").Find(ctx, bson.M{"_id": bson.M{"$in": ids}},
+		options.Find().SetProjection(bson.M{"title": 1, "status": 1, "scope": 1, "metrics": 1}))
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx) //nolint:errcheck
+	var tasks []models.SEOTask
+	if err = cursor.All(ctx, &tasks); err != nil {
+		return nil, err
+	}
+	refs := make(map[bson.ObjectID]*taskRef, len(tasks))
+	for _, t := range tasks {
+		refs[t.ID] = &taskRef{ID: t.ID, Title: t.Title, Status: t.Status, Scope: t.Scope, Pages: t.Metrics.Pages}
+	}
+	for i := range views {
+		if id := views[i].TaskID; id != nil {
+			views[i].Task = refs[*id]
+		}
+	}
+	return views, nil
 }
 
 // TaskHandler holds dependencies for the task endpoints.
@@ -56,11 +111,7 @@ func projectFromRequest(ctx context.Context, c *gin.Context, db *mongo.Database)
 	return id, true
 }
 
-func listTasks(ctx context.Context, db *mongo.Database, projectID bson.ObjectID, status string, limit int64) ([]models.SEOTask, error) {
-	query := bson.M{"project_id": projectID}
-	if status != "" {
-		query["status"] = models.TaskStatus(status)
-	}
+func listTasks(ctx context.Context, db *mongo.Database, query bson.M, limit int64) ([]models.SEOTask, error) {
 	cursor, err := db.Collection("seo_tasks").Find(ctx, query, options.Find().
 		SetSort(bson.D{{Key: "metrics.impressions", Value: -1}, {Key: "metrics.pages", Value: -1}, {Key: "_id", Value: 1}}).
 		SetLimit(limit))
@@ -73,6 +124,35 @@ func listTasks(ctx context.Context, db *mongo.Database, projectID bson.ObjectID,
 		return nil, err
 	}
 	return tasks, nil
+}
+
+func (h *TaskHandler) views(ctx context.Context, tasks []models.SEOTask) ([]taskView, error) {
+	views := make([]taskView, 0, len(tasks))
+	ids := make([]bson.ObjectID, 0, len(tasks))
+	index := make(map[bson.ObjectID]int, len(tasks))
+	for i := range tasks {
+		views = append(views, taskView{SEOTask: tasks[i], Brief: tasks[i].Brief(), Suggestions: []taskSuggestion{}})
+		ids = append(ids, tasks[i].ID)
+		index[tasks[i].ID] = i
+	}
+	if len(ids) == 0 {
+		return views, nil
+	}
+	cursor, err := h.db.Collection("suggestions").Find(ctx, bson.M{"task_id": bson.M{"$in": ids}},
+		options.Find().SetProjection(bson.M{"page": 1, "kind": 1, "status": 1, "task_id": 1}))
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx) //nolint:errcheck
+	var rows []models.Suggestion
+	if err = cursor.All(ctx, &rows); err != nil {
+		return nil, err
+	}
+	for _, s := range rows {
+		i := index[*s.TaskID]
+		views[i].Suggestions = append(views[i].Suggestions, taskSuggestion{ID: s.ID, Page: s.Page, Kind: s.Kind, Status: s.Status})
+	}
+	return views, nil
 }
 
 // List godoc
@@ -90,21 +170,55 @@ func (h *TaskHandler) List(c *gin.Context) {
 	if !ok {
 		return
 	}
-	tasks, err := listTasks(ctx, h.db, id, c.Query("status"), 200)
+	query := bson.M{"project_id": id}
+	if status := c.Query("status"); status != "" {
+		query["status"] = models.TaskStatus(status)
+	}
+	tasks, err := listTasks(ctx, h.db, query, 200)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch tasks"})
 		return
 	}
-	views := make([]taskView, 0, len(tasks))
-	for i := range tasks {
-		views = append(views, taskView{SEOTask: tasks[i], Brief: tasks[i].Brief()})
+	views, err := h.views(ctx, tasks)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch task suggestions"})
+		return
 	}
 	c.JSON(http.StatusOK, views)
 }
 
+// Impact godoc
+// @Summary      List finished tasks with their measured effect, newest first
+// @Tags         projects
+// @Produce      json
+// @Param        id  path  string  true  "Project ID"
+// @Success      200  {array}  models.SEOTask
+// @Router       /api/v1/projects/{id}/impact [get]
+func (h *TaskHandler) Impact(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	id, ok := projectFromRequest(ctx, c, h.db)
+	if !ok {
+		return
+	}
+	cursor, err := h.db.Collection("seo_tasks").Find(ctx, bson.M{"project_id": id, "done_at": bson.M{"$exists": true}},
+		options.Find().SetSort(bson.D{{Key: "done_at", Value: -1}}).SetLimit(200))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch tasks"})
+		return
+	}
+	defer cursor.Close(ctx) //nolint:errcheck
+	tasks := []models.SEOTask{}
+	if err = cursor.All(ctx, &tasks); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode tasks"})
+		return
+	}
+	c.JSON(http.StatusOK, tasks)
+}
+
 // Update godoc
 // @Summary      Change a task's status
-// @Description  action is claim, done, dismiss or reopen. done starts the recheck.
+// @Description  action is approve, claim, done, confirm, dismiss or reopen. done starts the recheck.
 // @Tags         projects
 // @Accept       json
 // @Produce      json
@@ -133,18 +247,25 @@ func (h *TaskHandler) Update(c *gin.Context) {
 		return
 	}
 
+	filter := bson.M{"_id": tid, "project_id": id}
 	var task *models.SEOTask
 	switch input.Action {
+	case "approve":
+		task, err = moveTask(ctx, h.db, filter, []models.TaskStatus{models.TaskStatusProposed}, bson.M{"status": models.TaskStatusOpen})
 	case "claim":
-		task, err = claimTask(ctx, h.db, bson.M{"_id": tid, "project_id": id}, "user")
+		task, err = claimTask(ctx, h.db, filter, "user")
 	case "done":
-		task, err = completeTask(ctx, h.db, h.asynqClient, bson.M{"_id": tid, "project_id": id}, input.Summary)
+		task, err = completeTask(ctx, h.db, h.asynqClient, filter, input.Summary)
+	case "confirm":
+		filter["verification.checked"] = 0
+		task, err = moveTask(ctx, h.db, filter, []models.TaskStatus{models.TaskStatusDone}, bson.M{"status": models.TaskStatusVerified})
 	case "dismiss":
-		task, err = setTaskStatus(ctx, h.db, bson.M{"_id": tid, "project_id": id}, models.TaskStatusDismissed)
+		task, err = dismissTask(ctx, h.db, filter)
 	case "reopen":
-		task, err = setTaskStatus(ctx, h.db, bson.M{"_id": tid, "project_id": id}, models.TaskStatusOpen)
+		task, err = moveTask(ctx, h.db, filter, []models.TaskStatus{models.TaskStatusDismissed, models.TaskStatusResolved, models.TaskStatusClosed},
+			bson.M{"status": models.TaskStatusOpen, "reopen_reason": "A person reopened this task."})
 	default:
-		c.JSON(http.StatusBadRequest, gin.H{"error": "action must be claim, done, dismiss or reopen"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "action must be approve, claim, done, confirm, dismiss or reopen"})
 		return
 	}
 	if errors.Is(err, mongo.ErrNoDocuments) {
@@ -155,10 +276,22 @@ func (h *TaskHandler) Update(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, taskView{SEOTask: *task, Brief: task.Brief()})
+	if err = worker.RebalanceTasks(ctx, h.db, id); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	views, err := h.views(ctx, []models.SEOTask{*task})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, views[0])
 }
 
-func updateTask(ctx context.Context, db *mongo.Database, filter, set bson.M) (*models.SEOTask, error) {
+// moveTask changes a task's state if it is in one of the given statuses.
+func moveTask(ctx context.Context, db *mongo.Database, filter bson.M, from []models.TaskStatus, set bson.M) (*models.SEOTask, error) {
+	filter["status"] = bson.M{"$in": from}
+	set["updated_at"] = time.Now().UTC()
 	var task models.SEOTask
 	err := db.Collection("seo_tasks").FindOneAndUpdate(ctx, filter, bson.M{"$set": set},
 		options.FindOneAndUpdate().SetReturnDocument(options.After)).Decode(&task)
@@ -168,31 +301,31 @@ func updateTask(ctx context.Context, db *mongo.Database, filter, set bson.M) (*m
 	return &task, nil
 }
 
-func setTaskStatus(ctx context.Context, db *mongo.Database, filter bson.M, status models.TaskStatus) (*models.SEOTask, error) {
-	return updateTask(ctx, db, filter, bson.M{"status": status, "updated_at": time.Now().UTC()})
+// dismissTask keeps the task's reach, which it has to double to come back.
+func dismissTask(ctx context.Context, db *mongo.Database, filter bson.M) (*models.SEOTask, error) {
+	var current models.SEOTask
+	if err := db.Collection("seo_tasks").FindOne(ctx, filter).Decode(&current); err != nil {
+		return nil, err
+	}
+	return moveTask(ctx, db, filter, []models.TaskStatus{
+		models.TaskStatusProposed, models.TaskStatusQueued, models.TaskStatusOpen, models.TaskStatusClaimed, models.TaskStatusReopened,
+	}, bson.M{"status": models.TaskStatusDismissed, "dismissed_impressions": current.Metrics.Impressions})
 }
 
 // claimTask gives a task to one worker: of two claims only the first succeeds.
 func claimTask(ctx context.Context, db *mongo.Database, filter bson.M, agent string) (*models.SEOTask, error) {
-	now := time.Now().UTC()
-	filter["status"] = bson.M{"$in": []models.TaskStatus{models.TaskStatusOpen, models.TaskStatusReopened}}
-	return updateTask(ctx, db, filter, bson.M{
-		"status": models.TaskStatusClaimed, "claimed_by": agent, "claimed_at": now, "updated_at": now,
-	})
+	return moveTask(ctx, db, filter, []models.TaskStatus{models.TaskStatusOpen, models.TaskStatusReopened},
+		bson.M{"status": models.TaskStatusClaimed, "claimed_by": agent, "claimed_at": time.Now().UTC()})
 }
 
-// completeTask records that the change is live, keeps the before-numbers for the
-// Impact page and starts the recheck.
+// completeTask records that the change is live and starts the recheck. The
+// clock of the measurement starts here.
 func completeTask(ctx context.Context, db *mongo.Database, client *asynq.Client, filter bson.M, summary string) (*models.SEOTask, error) {
-	now := time.Now().UTC()
-	filter["status"] = bson.M{"$in": []models.TaskStatus{models.TaskStatusOpen, models.TaskStatusClaimed, models.TaskStatusReopened}}
-	task, err := updateTask(ctx, db, filter, bson.M{
-		"status": models.TaskStatusDone, "done_at": now, "done_summary": summary, "updated_at": now,
-	})
+	task, err := moveTask(ctx, db, filter, []models.TaskStatus{models.TaskStatusOpen, models.TaskStatusClaimed, models.TaskStatusReopened},
+		bson.M{"status": models.TaskStatusDone, "done_at": time.Now().UTC(), "done_summary": summary, "reopen_reason": ""})
 	if err != nil {
 		return nil, err
 	}
-	recordTaskImpact(ctx, db, task, now)
 	verify, err := worker.NewVerifyTask(task.ID.Hex())
 	if err != nil {
 		return task, err
@@ -201,121 +334,4 @@ func completeTask(ctx context.Context, db *mongo.Database, client *asynq.Client,
 		return task, err
 	}
 	return task, nil
-}
-
-// recordTaskImpact logs the change per page for impact tracking. A failure here
-// loses a measurement, not the task.
-func recordTaskImpact(ctx context.Context, db *mongo.Database, task *models.SEOTask, now time.Time) {
-	for i, page := range task.Pages {
-		if i == maxImpactPages {
-			break
-		}
-		before := pageMetrics(ctx, db, task.ProjectID, page, now.AddDate(0, 0, -28), now.AddDate(0, 0, -1))
-		taskID := task.ID
-		_, _ = db.Collection("applied_changes").UpdateOne(ctx,
-			bson.M{"task_id": taskID, "page": page},
-			bson.M{"$setOnInsert": models.AppliedChange{
-				ID: bson.NewObjectID(), ProjectID: task.ProjectID, TaskID: &taskID, Kind: task.Issue, Page: page,
-				Value: task.Title, Adapter: "task", Status: "applied", AppliedAt: now, BeforeSnapshot: before,
-			}},
-			options.UpdateOne().SetUpsert(true))
-	}
-}
-
-// createTaskFrom stores the task of a suggestion and links it. A suggestion
-// already covered by a task keeps that task.
-func createTaskFrom(ctx context.Context, db *mongo.Database, s models.Suggestion) (*models.SEOTask, error) {
-	var analysis *models.PageAnalysis
-	if s.AnalysisID != nil {
-		found, err := worker.LoadAnalyses(ctx, db, []bson.ObjectID{*s.AnalysisID})
-		if err != nil {
-			return nil, err
-		}
-		if a, ok := found[*s.AnalysisID]; ok {
-			analysis = &a
-		}
-	}
-	now := time.Now().UTC()
-	draft := worker.TaskFromSuggestion(s, analysis, worker.PageStat(ctx, db, s.ProjectID, s.Page))
-	task, err := worker.UpsertTask(ctx, db, draft, time.Time{}, now)
-	if err != nil {
-		return nil, err
-	}
-	_, err = db.Collection("suggestions").UpdateOne(ctx, bson.M{"_id": s.ID},
-		bson.M{"$set": bson.M{"task_id": task.ID, "updated_at": now}})
-	return task, err
-}
-
-// CreateFromSuggestion godoc
-// @Summary      Create a task from a suggestion marked Apply on site
-// @Tags         projects
-// @Produce      json
-// @Param        id   path  string  true  "Project ID"
-// @Param        sid  path  string  true  "Suggestion ID"
-// @Success      201  {object}  models.SEOTask
-// @Router       /api/v1/projects/{id}/suggestions/{sid}/task [post]
-func (h *TaskHandler) CreateFromSuggestion(c *gin.Context) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	id, ok := projectFromRequest(ctx, c, h.db)
-	if !ok {
-		return
-	}
-	sid, err := bson.ObjectIDFromHex(c.Param("sid"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid suggestion id"})
-		return
-	}
-	var s models.Suggestion
-	if err = h.db.Collection("suggestions").FindOne(ctx, bson.M{"_id": sid, "project_id": id}).Decode(&s); err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "suggestion not found"})
-		return
-	}
-	if s.Status != models.SuggestionStatusApplyOnSite {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "only suggestions marked Apply on site can become a task (current status: " + string(s.Status) + ")"})
-		return
-	}
-	task, err := createTaskFrom(ctx, h.db, s)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusCreated, taskView{SEOTask: *task, Brief: task.Brief()})
-}
-
-// CreateFromMarked godoc
-// @Summary      Create tasks from every suggestion marked Apply on site
-// @Tags         projects
-// @Produce      json
-// @Param        id  path  string  true  "Project ID"
-// @Success      200  {object}  map[string]int
-// @Router       /api/v1/projects/{id}/suggestions/tasks [post]
-func (h *TaskHandler) CreateFromMarked(c *gin.Context) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	id, ok := projectFromRequest(ctx, c, h.db)
-	if !ok {
-		return
-	}
-	cursor, err := h.db.Collection("suggestions").Find(ctx, bson.M{
-		"project_id": id, "status": models.SuggestionStatusApplyOnSite, "task_id": bson.M{"$exists": false},
-	})
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch suggestions"})
-		return
-	}
-	var list []models.Suggestion
-	if err = cursor.All(ctx, &list); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode suggestions"})
-		return
-	}
-	created := 0
-	for _, s := range list {
-		if _, err = createTaskFrom(ctx, h.db, s); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error(), "created": created})
-			return
-		}
-		created++
-	}
-	c.JSON(http.StatusOK, gin.H{"created": created})
 }
