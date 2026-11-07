@@ -29,6 +29,8 @@ import (
 
 const (
 	snapshotTTL = 24 * time.Hour
+	// snapshotVersion invalidates cached snapshots when extraction changes.
+	snapshotVersion = 2
 
 	// navLinkDensity marks a block as navigation: nearly all of its text is
 	// link text. Measured on cipomarket.hu: menu 0.92, product list 0.23,
@@ -38,6 +40,8 @@ const (
 	// proseLinkDensity is the highest link density of a prose block.
 	proseLinkDensity = 0.25
 	proseMinChars    = 150
+	// sidebarLinkDensity marks an <aside> as a sidebar rather than main content.
+	sidebarLinkDensity = 0.4
 
 	listingMinCards = 4
 
@@ -146,6 +150,11 @@ func measure(n *html.Node, insideLink bool) *htmlBlock {
 
 // visibleText returns n's visible text with block boundaries kept as spaces.
 func visibleText(n *html.Node) string {
+	return textOutside(n, nil)
+}
+
+// textOutside is visibleText without the subtrees rooted at skip nodes.
+func textOutside(n *html.Node, skip map[*html.Node]bool) string {
 	var sb strings.Builder
 	var walk func(*html.Node)
 	walk = func(cur *html.Node) {
@@ -154,7 +163,7 @@ func visibleText(n *html.Node) string {
 			case html.TextNode:
 				sb.WriteString(c.Data)
 			case html.ElementNode:
-				if isInvisible(c) {
+				if isInvisible(c) || skip[c] {
 					continue
 				}
 				block := blockTags[c.DataAtom]
@@ -182,10 +191,15 @@ func isChromeBlock(b *htmlBlock) bool {
 	switch n.DataAtom {
 	case atom.Nav, atom.Footer:
 		return true
-	case atom.Header, atom.Aside:
-		// Templates also use these for the main column; cipomarket.hu's product
-		// page has its H1 and description inside an <aside>.
+	case atom.Header:
 		if !containsH1(n) {
+			return true
+		}
+	case atom.Aside:
+		// Templates also use <aside> for the main column: cipomarket.hu's product
+		// page keeps its price, description and availability in one, with the
+		// H1 sometimes outside it. A sidebar is recognized by its links.
+		if !containsH1(n) && b.linkDensity() >= sidebarLinkDensity {
 			return true
 		}
 	}
@@ -195,7 +209,9 @@ func isChromeBlock(b *htmlBlock) bool {
 	if n.DataAtom != atom.Body && reFilterRegion.MatchString(classAndID(n)) {
 		return true
 	}
-	return b.text >= navMinChars && b.linkDensity() >= navLinkDensity
+	// On a short page the menu outweighs the content, so a wrapper up to <body>
+	// can look like navigation. A block holding the H1 is never navigation.
+	return b.text >= navMinChars && b.linkDensity() >= navLinkDensity && !containsH1(n)
 }
 
 func containsH1(n *html.Node) bool {
@@ -339,7 +355,17 @@ func extractSnapshot(pageURL string, statusCode int, rendered string) (*models.P
 	extractLinksAndImages(body, seg, pageURL, snap)
 
 	snap.TotalWordCount = len(strings.Fields(visibleText(body)))
-	snap.ContentWordCount = wordsOf(snap.Prose)
+	// Text too short to be a prose block still counts: a thin page must show up
+	// as thin, not as empty.
+	outside := listingNodes(seg)
+	for n := range seg.chrome {
+		outside[n] = true
+	}
+	rest := textOutside(body, outside)
+	if len(snap.Prose) == 0 && rest != "" {
+		snap.Prose = []string{rest}
+	}
+	snap.ContentWordCount = len(strings.Fields(rest))
 	for _, c := range seg.listing {
 		snap.ContentWordCount += len(strings.Fields(visibleText(c.node)))
 	}
@@ -352,9 +378,9 @@ func extractSnapshot(pageURL string, statusCode int, rendered string) (*models.P
 	}
 	sumChrome(root, seg, &snap.Coverage.ChromeChars)
 
-	// A page without its own heading or text may be listing unrelated items
-	// only, such as a product page whose main column was not recognized.
-	snap.LowConfidence = snap.ContentWordCount < minContentWords || (len(snap.Prose) == 0 && !hasContentH1(snap))
+	// Only a page that lost its main content is untrusted. A page with an H1 and
+	// little text is readable, and being thin is a finding about it.
+	snap.LowConfidence = !hasContentH1(snap) && (snap.ContentWordCount < minContentWords || len(snap.Prose) == 0)
 	snap.Fingerprint = snapshotFingerprint(snap)
 	return snap, nil
 }
@@ -376,14 +402,6 @@ func sumChrome(b *htmlBlock, seg *segmenter, total *int) {
 	for _, c := range b.children {
 		sumChrome(c, seg, total)
 	}
-}
-
-func wordsOf(parts []string) int {
-	n := 0
-	for _, p := range parts {
-		n += len(strings.Fields(p))
-	}
-	return n
 }
 
 func extractHead(doc *html.Node, snap *models.PageSnapshot) {
@@ -898,6 +916,7 @@ func (p *Processor) loadSnapshot(ctx context.Context, projectOID bson.ObjectID, 
 	err := p.db.Collection("page_snapshots").FindOne(ctx, bson.M{
 		"project_id": projectOID,
 		"url":        normalizePageURL(pageURL),
+		"version":    snapshotVersion,
 		"expires_at": bson.M{"$gt": time.Now().UTC()},
 	}).Decode(&snap)
 	if errors.Is(err, mongo.ErrNoDocuments) {
@@ -932,6 +951,7 @@ func (p *Processor) getSnapshot(ctx context.Context, projectOID bson.ObjectID, p
 	}
 	now := time.Now().UTC()
 	snap.ProjectID = projectOID
+	snap.Version = snapshotVersion
 	snap.FetchedAt = now
 	snap.ExpiresAt = now.Add(snapshotTTL)
 	if _, err = p.db.Collection("page_snapshots").ReplaceOne(ctx,

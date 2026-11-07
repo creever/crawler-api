@@ -78,7 +78,9 @@ type PageSnapshot struct {
 	LowConfidence    bool             `bson:"low_confidence"     json:"low_confidence"`
 	Coverage         SnapshotCoverage `bson:"coverage"           json:"coverage"`
 	// Fingerprint changes when the SEO-relevant content of the page changes.
-	Fingerprint string    `bson:"fingerprint" json:"fingerprint"`
-	FetchedAt   time.Time `bson:"fetched_at"  json:"fetched_at"`
-	ExpiresAt   time.Time `bson:"expires_at"  json:"expires_at"`
+	Fingerprint string `bson:"fingerprint" json:"fingerprint"`
+	// Version is the extractor version that produced this snapshot.
+	Version   int       `bson:"version"     json:"version"`
+	FetchedAt time.Time `bson:"fetched_at"  json:"fetched_at"`
+	ExpiresAt time.Time `bson:"expires_at"  json:"expires_at"`
 }

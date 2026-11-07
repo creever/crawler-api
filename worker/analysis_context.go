@@ -24,7 +24,11 @@ const (
 	contextCategoryChars = 3000
 	contextProseChars    = 6000 // category text included
 	contextLinks         = 30
-	relatedExcerptChars  = 500
+	// contextSignalsPerType keeps a page with dozens of query-level signals from
+	// crowding out everything else; each type's strongest ones are shown.
+	contextSignalsPerType = 5
+	contextDetailChars    = 300
+	relatedExcerptChars   = 500
 )
 
 // pageQueryStat is one query of a page, current window vs previous window.
@@ -127,10 +131,7 @@ func buildContextPack(in contextInput) *contextPack {
 
 	fmt.Fprintf(&c.sb, "Site brand: %s\nPage under analysis: %s\n", in.Brand, in.Page)
 
-	c.section("Detected signals")
-	for _, o := range in.Opportunities {
-		c.fact("S", "%s", describeSignal(o))
-	}
+	writeSignals(c, in.Opportunities)
 
 	writePageFacts(c, in)
 	writeContent(c, snap)
@@ -143,6 +144,31 @@ func buildContextPack(in contextInput) *contextPack {
 	c.Text = c.sb.String()
 	c.Coverage.CharsSent = utf8.RuneCountInString(c.Text)
 	return c
+}
+
+// writeSignals renders the strongest signals of each type. Opportunities
+// arrive ranked, so the first ones of a type are its strongest.
+func writeSignals(c *contextPack, opps []models.Opportunity) {
+	c.section("Detected signals")
+	shown := make(map[models.OpportunityType]int)
+	total := make(map[models.OpportunityType]int)
+	var order []models.OpportunityType
+	for _, o := range opps {
+		if total[o.Type] == 0 {
+			order = append(order, o.Type)
+		}
+		total[o.Type]++
+		if shown[o.Type] < contextSignalsPerType {
+			shown[o.Type]++
+			c.fact("S", "%s", describeSignal(o))
+		}
+	}
+	for _, t := range order {
+		if total[t] > shown[t] {
+			fmt.Fprintf(&c.sb, "(%s: %d signals in total, the strongest %d are shown.)\n", t, total[t], shown[t])
+			c.Coverage.Truncated = append(c.Coverage.Truncated, "signals: "+string(t))
+		}
+	}
 }
 
 func describeSignal(o models.Opportunity) string {
@@ -164,7 +190,8 @@ func describeSignal(o models.Opportunity) string {
 		}
 	}
 	if o.Details != "" {
-		parts = append(parts, o.Details)
+		details, _ := clip(o.Details, contextDetailChars)
+		parts = append(parts, details)
 	}
 	return strings.Join(parts, ", ")
 }
@@ -173,8 +200,8 @@ func writePageFacts(c *contextPack, in contextInput) {
 	snap := in.Snapshot
 	c.section("Page head and technical facts")
 	c.fact("P", "HTTP status: %d", snap.StatusCode)
-	c.fact("P", "Title (%d chars): %q", utf8.RuneCountInString(snap.Title), snap.Title)
-	c.fact("P", "Meta description (%d chars): %q", utf8.RuneCountInString(snap.MetaDescription), snap.MetaDescription)
+	c.fact("P", "%s", lengthFact("Title", snap.Title, maxTitleChars))
+	c.fact("P", "%s", lengthFact("Meta description", snap.MetaDescription, maxMetaChars))
 	switch {
 	case snap.Canonical == "":
 		c.fact("P", "Canonical: missing")
@@ -189,7 +216,20 @@ func writePageFacts(c *contextPack, in contextInput) {
 		c.fact("P", "Hreflang: %s", strings.Join(snap.Hreflang, ", "))
 	}
 	c.fact("P", "Content words: %d (the whole page incl. menus: %d)", snap.ContentWordCount, snap.TotalWordCount)
+	if isUnavailablePage(snap) {
+		c.fact("P", "Availability: the page says this product is currently unavailable")
+	}
 	c.fact("P", "<img> tags: %d, without alt text: %d (CSS background images are not counted)", snap.ImagesTotal, snap.ImagesMissingAlt)
+}
+
+// lengthFact states the length verdict, so the model doesn't have to judge it.
+func lengthFact(label, text string, limit int) string {
+	n := utf8.RuneCountInString(text)
+	verdict := "within"
+	if n > limit {
+		verdict = "over"
+	}
+	return fmt.Sprintf("%s (%d chars, %s the %d limit): %q", label, n, verdict, limit, text)
 }
 
 func listOrNone(items []string) string {
@@ -295,7 +335,8 @@ func writeSearchData(c *contextPack, in contextInput) {
 	if in.GA4 == nil {
 		c.sb.WriteString("No GA4 data.\n")
 	} else {
-		c.fact("G", "Sessions %.0f, conversions %.0f, revenue %.0f HUF", in.GA4.Sessions, in.GA4.Conversions, in.GA4.Revenue)
+		c.fact("G", "Sessions %.0f, key events %.0f, revenue %.0f HUF", in.GA4.Sessions, in.GA4.Conversions, in.GA4.Revenue)
+		c.sb.WriteString("Key events and revenue per landing page can be misattributed (for example to the cart). Use sessions as a measure of traffic, and never conclude from these figures that a page does or does not sell.\n")
 	}
 }
 

@@ -220,7 +220,25 @@ func (p *Processor) HandleGSCSync(ctx context.Context, t *asynq.Task) error {
 		zap.String("project_id", payload.ProjectID),
 		zap.Int64("rows", totalRows),
 	)
+	p.recomputeOpportunitiesAfterSync(ctx, payload.ProjectID, totalRows)
 	return nil
+}
+
+// recomputeOpportunitiesAfterSync refreshes the signals once new rows are in. A
+// compute that ran while the sync was still writing saw only part of the
+// window, and its numbers would otherwise stay wrong until the next day.
+func (p *Processor) recomputeOpportunitiesAfterSync(ctx context.Context, projectID string, rows int64) {
+	if rows == 0 || p.asynqClient == nil {
+		return
+	}
+	task, err := NewComputeOppsTask(projectID)
+	if err == nil {
+		_, err = p.asynqClient.EnqueueContext(ctx, task)
+	}
+	if err != nil {
+		p.logger.Error("gsc:sync failed to enqueue opportunities:compute",
+			zap.String("project_id", projectID), zap.Error(err))
+	}
 }
 
 // syncGSCBucket fetches one date bucket with startRow pagination and upserts

@@ -164,6 +164,46 @@ func TestSnapshotProductPage(t *testing.T) {
 	}
 }
 
+func TestSnapshotThinProductPageIsReadable(t *testing.T) {
+	s := fixtureSnapshot(t, "cipomarket_product_thin.html", "https://cipomarket.hu/cipo-nike-ferfi-utcai-cipo-feher-44123")
+	if s.LowConfidence {
+		t.Fatalf("a thin page is a finding, not a blocked page: %+v", s.Coverage)
+	}
+	joined := strings.Join(s.Prose, " ")
+	for _, want := range []string{"A termék jelenleg nem elérhető", "Nike Férfi fehér Utcai cipö"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("main column lost %q, prose = %.300q", want, joined)
+		}
+	}
+	if strings.Contains(joined, "Népszerű márkák") {
+		t.Error("site chrome leaked into prose")
+	}
+	if s.ContentWordCount == 0 {
+		t.Error("content words must be counted")
+	}
+}
+
+func TestSnapshotHeadingWithShortTextStaysReadable(t *testing.T) {
+	s, err := extractSnapshot("https://example.com/p", 200, `<html><body><h1>Nike cipő</h1><p>Rövid leírás.</p></body></html>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.LowConfidence || len(s.Prose) != 1 || s.ContentWordCount == 0 {
+		t.Errorf("snapshot = %+v", s)
+	}
+}
+
+func TestSnapshotLinkHeavyAsideIsChrome(t *testing.T) {
+	links := strings.Repeat(`<li><a href="/x">Kapcsolódó oldal neve</a></li>`, 8)
+	s, err := extractSnapshot("https://example.com/p", 200, `<html><body><h1>Cím</h1><aside><ul>`+links+`</ul></aside><p>`+strings.Repeat("Tartalmi szöveg az oldalról. ", 12)+`</p></body></html>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(s.Prose, " "), "Kapcsolódó") {
+		t.Errorf("sidebar leaked into prose: %q", s.Prose)
+	}
+}
+
 func TestSnapshotHomePage(t *testing.T) {
 	s := fixtureSnapshot(t, "cipomarket_home.html", "https://cipomarket.hu/")
 	if s.LowConfidence {

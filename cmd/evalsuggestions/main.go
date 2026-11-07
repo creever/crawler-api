@@ -155,6 +155,13 @@ func printAnalysis(a *models.PageAnalysis, suggestions []models.Suggestion) {
 	if a.StatusReason != "" {
 		fmt.Printf("\n%s\n", a.StatusReason)
 	}
+	if a.Status == models.AnalysisStatusFailed && a.RawResponse != "" {
+		raw := []rune(a.RawResponse)
+		if len(raw) > 400 {
+			raw = raw[len(raw)-400:]
+		}
+		fmt.Printf("\nA válasz vége: `%s`\n", string(raw))
+	}
 	if a.PrimaryIssue != "" {
 		fmt.Printf("\n**Probléma:** %s\n\n**Gyökérok:** %s\n", a.PrimaryIssue, a.RootCause)
 	}

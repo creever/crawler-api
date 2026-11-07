@@ -58,6 +58,57 @@ func TestContextPackHoldsRealPageContent(t *testing.T) {
 	}
 }
 
+func TestContextPackCapsSignalsPerType(t *testing.T) {
+	in := testInput(t)
+	in.Opportunities = nil
+	for i := 0; i < 12; i++ {
+		in.Opportunities = append(in.Opportunities, models.Opportunity{Type: models.OppCannibalization, Query: "q", Page: testPage, Details: strings.Repeat("x", 2000)})
+	}
+	in.Opportunities = append(in.Opportunities, models.Opportunity{Type: models.OppLosingClicks, Page: testPage})
+	pack := buildContextPack(in)
+	if _, ok := pack.Facts["S6"]; !ok {
+		t.Error("the other signal type must keep its place")
+	}
+	if _, ok := pack.Facts["S7"]; ok {
+		t.Error("signals were not capped")
+	}
+	if !strings.Contains(pack.Text, "cannibalization: 12 signals in total") || !containsString(pack.Coverage.Truncated, "signals: cannibalization") {
+		t.Errorf("truncation not reported: %v", pack.Coverage.Truncated)
+	}
+	if len(pack.Facts["S1"]) > 400 {
+		t.Errorf("signal details not clipped: %d", len(pack.Facts["S1"]))
+	}
+}
+
+func TestContextPackWarnsAboutConversions(t *testing.T) {
+	if !strings.Contains(buildContextPack(testInput(t)).Text, "misattributed") {
+		t.Error("GA4 conversion warning missing")
+	}
+}
+
+func TestValidateRejectsFalseLengthClaim(t *testing.T) {
+	in := testInput(t)
+	pack := buildContextPack(in)
+	r := goodResponse()
+	r.Diagnosis.Evidence = append(r.Diagnosis.Evidence, struct {
+		Ref   string `json:"ref"`
+		Claim string `json:"claim"`
+	}{"P3", "A meta leírás túl hosszú."})
+	v := validateAnalysis(&r, pack, in.Snapshot)
+	if len(v.Evidence) != 1 || !strings.Contains(strings.Join(v.Problems, ";"), "contradicts") {
+		t.Errorf("evidence = %+v, problems = %v", v.Evidence, v.Problems)
+	}
+
+	over := in
+	snap := *in.Snapshot
+	snap.MetaDescription = strings.Repeat("a", 200)
+	over.Snapshot = &snap
+	v = validateAnalysis(&r, buildContextPack(over), &snap)
+	if strings.Contains(strings.Join(v.Problems, ";"), "contradicts") {
+		t.Errorf("a true claim was rejected: %v", v.Problems)
+	}
+}
+
 func TestContextPackReportsTruncation(t *testing.T) {
 	in := testInput(t)
 	in.Snapshot.Prose = []string{strings.Repeat("hosszú szöveg ", 1000)}
@@ -148,6 +199,8 @@ func TestValidateRejects(t *testing.T) {
 		{"same title", analysisAction{Kind: "title", Proposed: in.Snapshot.Title, EvidenceRefs: []string{"Q1"}}, "identical"},
 		{"foreign brand", analysisAction{Kind: "title", Proposed: "Női bokacsizma és Nike újdonságok", EvidenceRefs: []string{"Q1"}}, "Nike"},
 		{"ignores existing text", analysisAction{Kind: "category_text", Proposed: "Új szöveg a témáról.", EvidenceRefs: []string{"Q1"}}, "C1"},
+		{"invented threshold", analysisAction{Kind: "meta_description", Proposed: "Női bokacsizma akciósan 15.000 Ft felett!", EvidenceRefs: []string{"Q1"}}, "15.000"},
+		{"free shipping", analysisAction{Kind: "meta_description", Proposed: "Női bokacsizma ingyenes szállítással és ingyenes kiszállítás minden rendelésre.", EvidenceRefs: []string{"Q1"}}, "free shipping"},
 		{"unknown kind", analysisAction{Kind: "magic", Proposed: "x", EvidenceRefs: []string{"Q1"}}, "unknown kind"},
 	}
 	for _, c := range cases {
@@ -162,6 +215,105 @@ func TestValidateRejects(t *testing.T) {
 				t.Errorf("problems = %v, want %q", v.Problems, c.want)
 			}
 		})
+	}
+}
+
+func TestActionAcceptsStructuredProposed(t *testing.T) {
+	raw := `{"diagnosis":{"primary_issue":"x"},"actions":[
+		{"kind":"internal_link","proposed":{"from":"/a","anchor":"Nike"},"target":{"url":"/b"},"evidence_refs":["Q1"]},
+		{"kind":"title","proposed":"Sima szöveg","evidence_refs":["Q1"]},
+		{"kind":"title","proposed":null,"evidence_refs":["Q1"]}]}`
+	r, err := parseAnalysis(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := r.Actions[0].Proposed; got != "anchor: Nike; from: /a" || !r.Actions[0].Structured {
+		t.Errorf("proposed = %q, structured = %v", got, r.Actions[0].Structured)
+	}
+	if r.Actions[0].Target != "url: /b" {
+		t.Errorf("target = %q", r.Actions[0].Target)
+	}
+	if r.Actions[1].Proposed != "Sima szöveg" || r.Actions[1].Structured {
+		t.Errorf("plain text changed: %+v", r.Actions[1])
+	}
+	if r.Actions[2].Proposed != "" {
+		t.Errorf("null = %q", r.Actions[2].Proposed)
+	}
+}
+
+func TestStructuredTextIsNotPublishable(t *testing.T) {
+	in := testInput(t)
+	r := goodResponse()
+	r.Actions = []analysisAction{
+		{Kind: "title", Proposed: "cím: Női bokacsizma", Structured: true, EvidenceRefs: []string{"Q1"}},
+		{Kind: "internal_link", Proposed: "from: /a; to: /b", Structured: true, EvidenceRefs: []string{"Q1"}},
+	}
+	v := validateAnalysis(&r, buildContextPack(in), in.Snapshot)
+	if len(v.Actions) != 1 || v.Actions[0].Kind != "internal_link" {
+		t.Errorf("actions = %+v, problems = %v", v.Actions, v.Problems)
+	}
+}
+
+func TestHarmfulActions(t *testing.T) {
+	const category = "https://cipomarket.hu/batz/papucs"
+	listing := &models.PageSnapshot{SourceURL: category, CategoryText: "Szöveg", Listing: &models.ListingSummary{ItemCount: 60}}
+	product := &models.PageSnapshot{SourceURL: "https://cipomarket.hu/cipo-nike-1", Prose: []string{"Nike cipő. A termék jelenleg nem elérhető."}}
+	available := &models.PageSnapshot{SourceURL: "https://cipomarket.hu/cipo-nike-1", Prose: []string{"Nike cipő. Kosárba."}}
+	cases := []struct {
+		name string
+		a    analysisAction
+		snap *models.PageSnapshot
+		want string
+	}{
+		{"301 on unavailable", analysisAction{Kind: "redirect_merge", Proposed: "301 a https://cipomarket.hu/nike/cipo oldalra"}, product, "unavailable"},
+		{"canonical on unavailable", analysisAction{Kind: "canonical", Proposed: "A canonical mutasson a /nike/cipo oldalra"}, product, "unavailable"},
+		{"listing into brand", analysisAction{Kind: "canonical", Proposed: "A canonicalt állítsd a https://cipomarket.hu/batz oldalra"}, listing, "/batz"},
+		{"listing into target", analysisAction{Kind: "redirect_merge", Proposed: "Egyesítsd.", Target: "/batz/noi/papucs"}, listing, "/batz/noi/papucs"},
+		{"subpage is no filter", analysisAction{Kind: "canonical", Proposed: "A /batz/papucs/noi canonicalja"}, listing, "/batz/papucs/noi"},
+		{"filters to clean url", analysisAction{Kind: "canonical", Proposed: "A /batz/papucs/meret:41 canonical mutasson a https://cipomarket.hu/batz/papucs oldalra"}, listing, ""},
+		{"self canonical check", analysisAction{Kind: "canonical", Proposed: "Ellenőrizd a canonicalt."}, listing, ""},
+		{"available product", analysisAction{Kind: "redirect_merge", Proposed: "301 a /nike/cipo oldalra, a modell megszűnt"}, available, ""},
+		{"other kinds pass", analysisAction{Kind: "internal_link", Proposed: "Linkelj a /batz oldalra"}, listing, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := harmfulAction(&c.a, c.snap)
+			if (c.want == "") != (got == "") || !strings.Contains(got, c.want) {
+				t.Errorf("harmfulAction = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+func TestContextStatesUnavailability(t *testing.T) {
+	in := testInput(t)
+	if strings.Contains(buildContextPack(in).Text, "Availability:") {
+		t.Error("a category page must not be marked unavailable")
+	}
+	snap := *in.Snapshot
+	snap.Prose = []string{"A termék jelenleg nem elérhető."}
+	in.Snapshot = &snap
+	if !strings.Contains(buildContextPack(in).Text, "currently unavailable") {
+		t.Error("availability fact missing")
+	}
+}
+
+func TestUnsupportedNumbers(t *testing.T) {
+	corpus := "ár 33.490 ft, kedvezmény -20%, 60000 ft-tól, 3-8 munkanap"
+	cases := []struct {
+		text string
+		want []string
+	}{
+		{"Most 33 490 Ft, 20% kedvezménnyel", nil},
+		{"Szállítás 3-8 nap", nil},
+		{"Már 15.000 Ft felett", []string{"15.000"}},
+		{"Akár 50% kedvezmény", []string{"50"}},
+	}
+	for _, c := range cases {
+		got := unsupportedNumbers(c.text, corpus)
+		if strings.Join(got, ",") != strings.Join(c.want, ",") {
+			t.Errorf("unsupportedNumbers(%q) = %v, want %v", c.text, got, c.want)
+		}
 	}
 }
 
@@ -280,6 +432,14 @@ func TestLLMFailures(t *testing.T) {
 	ai = &scriptedAI{answers: []string{"ez nem JSON"}}
 	if o := runLLMAnalysis(context.Background(), ai.call, pack, in.Opportunities, in.Snapshot); o.Analysis.Status != models.AnalysisStatusFailed {
 		t.Errorf("garbage status = %s", o.Analysis.Status)
+	}
+}
+
+func TestPromptForbidsHarmfulAdvice(t *testing.T) {
+	for _, want := range []string{"Never point the canonical of a category", "do not recommend a 301", "is normal for a shop"} {
+		if !strings.Contains(analysisSystemPrompt, want) {
+			t.Errorf("system prompt lacks %q", want)
+		}
 	}
 }
 

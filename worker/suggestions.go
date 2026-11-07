@@ -22,7 +22,7 @@ const (
 	// suggestLanguage is the language AI suggestions are generated in.
 	suggestLanguage = "hu"
 	// analysisMaxTokens leaves room for a diagnosis plus a full category text.
-	analysisMaxTokens = 3000
+	analysisMaxTokens = 4000
 	// analysisRenderBudget caps Chrome renders per run on the small crawler box.
 	analysisRenderBudget = 20
 	// analysisOppsPerLimit is how many ranked opportunities are read per page
@@ -179,7 +179,7 @@ func runLLMAnalysis(ctx context.Context, ai aiCallFn, pack *contextPack, opps []
 
 	if resp == nil {
 		outcome.Analysis.Status = models.AnalysisStatusFailed
-		outcome.Analysis.StatusReason = "A modell válasza nem értelmezhető."
+		outcome.Analysis.StatusReason = "A modell válasza nem értelmezhető: " + parseErr.Error()
 		return outcome
 	}
 	if strings.TrimSpace(resp.Diagnosis.PrimaryIssue) == "" && len(checked.Actions) == 0 && resp.NoActionReason == "" {
