@@ -23,11 +23,16 @@ type Opportunity struct {
 	ID        bson.ObjectID   `bson:"_id,omitempty" json:"id,omitempty"`
 	ProjectID bson.ObjectID   `bson:"project_id"    json:"project_id"`
 	Type      OpportunityType `bson:"type"        json:"type"`
+	// Key is type|query|page: the same finding keeps its row and id across
+	// the daily recomputation.
+	Key   string `bson:"key"           json:"key"`
 	Query     string          `bson:"query"         json:"query"`
 	Page      string          `bson:"page"          json:"page"`
 	// Pages lists every page competing for the query, strongest first
 	// (cannibalization only). Page is then the first entry.
 	Pages []string `bson:"pages,omitempty" json:"pages,omitempty"`
+	// Score is the estimated extra clicks per 28 days, the same unit for
+	// every type, so one ranking can mix them.
 	Score float64  `bson:"score"         json:"score"`
 	Rank  int      `bson:"rank"          json:"rank"`
 	// Metrics carries the raw numbers behind the score (impressions, clicks,

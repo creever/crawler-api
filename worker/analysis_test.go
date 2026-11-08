@@ -571,3 +571,25 @@ func TestStructuredAvailability(t *testing.T) {
 		t.Fatal("one purchasable offer must win")
 	}
 }
+
+func TestSiteStructureFactsReachTheModel(t *testing.T) {
+	in := testInput(t)
+	if text := buildContextPack(in).Text; !strings.Contains(text, "inbound internal links are unknown") {
+		t.Fatal("without a profile the model must be told links are unknown")
+	}
+	in.Profile = &models.PageProfile{Inbound: 0, Depth: -1, InSitemap: true, BrokenLinks: 2,
+		Issues: []models.PageIssue{{Code: "orphan", Severity: models.SeverityWarning}}}
+	in.Audit = &models.SiteAudit{PagesFetched: 480, URLsKnown: 500}
+	pack := buildContextPack(in)
+	for _, want := range []string{"read 480 of 500 known URLs", "Inbound internal links from read pages: 0", "not reached by links", "In the XML sitemap: yes", "2 to error pages", "orphan (warning)"} {
+		if !strings.Contains(pack.Text, want) {
+			t.Fatalf("context lacks %q:\n%s", want, pack.Text)
+		}
+	}
+	if strings.Contains(pack.Text, "inbound internal links are unknown") {
+		t.Fatal("a read page must not be called unknown")
+	}
+	if !strings.Contains(pack.Facts["N1"], "Inbound internal links") {
+		t.Fatal("site structure facts must be citable")
+	}
+}

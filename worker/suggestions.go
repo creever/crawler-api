@@ -310,6 +310,8 @@ func (p *Processor) analyzeTarget(ctx context.Context, project *models.Project, 
 		missing = append(missing, "GA4 data")
 	}
 
+	input.Profile, input.Audit = p.pageStructure(ctx, project.ID, target.Page)
+
 	for _, rel := range pickRelatedPages(target.Page, target.Opps, competing) {
 		relSnap, relErr := p.getSnapshot(ctx, project.ID, rel.URL, project.UseJS, pacer)
 		if relErr != nil || relSnap.StatusCode >= 400 {
@@ -465,11 +467,40 @@ func (p *Processor) loadTargets(ctx context.Context, projectOID bson.ObjectID, p
 		return []analysisTarget{{Page: opp.Page, Opps: opps}}, nil
 	}
 
-	opps, err := p.findOpportunities(ctx, bson.M{"project_id": projectOID, "page": bson.M{"$ne": ""}}, int64(limit*analysisOppsPerLimit))
-	if err != nil {
-		return nil, err
+	// Each signal type gets its turn: the strongest of every type comes before
+	// the second strongest of any, so one type cannot fill the whole run.
+	perType := make([][]models.Opportunity, 0, len(opportunityTypes))
+	for _, typ := range opportunityTypes {
+		opps, err := p.findOpportunities(ctx, bson.M{"project_id": projectOID, "type": typ, "page": bson.M{"$ne": ""}}, int64(limit*analysisOppsPerLimit))
+		if err != nil {
+			return nil, err
+		}
+		perType = append(perType, opps)
 	}
-	return groupOpportunitiesByPage(opps), nil
+	return groupOpportunitiesByPage(interleaveByType(perType)), nil
+}
+
+// opportunityTypes lists the signal types a bulk run takes turns over.
+var opportunityTypes = []models.OpportunityType{
+	models.OppCrawlIssue, models.OppLosingClicks, models.OppLowCTR,
+	models.OppStrikingDistance, models.OppCannibalization,
+}
+
+// interleaveByType merges ranked lists of each type round-robin.
+func interleaveByType(perType [][]models.Opportunity) []models.Opportunity {
+	var out []models.Opportunity
+	for i := 0; ; i++ {
+		added := false
+		for _, list := range perType {
+			if i < len(list) {
+				out = append(out, list[i])
+				added = true
+			}
+		}
+		if !added {
+			return out
+		}
+	}
 }
 
 func (p *Processor) findOpportunities(ctx context.Context, filter bson.M, limit int64) ([]models.Opportunity, error) {
@@ -683,4 +714,20 @@ func extractJSON(raw string) string {
 		return s[start : end+1]
 	}
 	return s
+}
+
+// pageStructure loads the page's site-crawl profile and the latest audit. A
+// page the crawl has not read with the current profile version has none.
+func (p *Processor) pageStructure(ctx context.Context, projectOID bson.ObjectID, page string) (*models.PageProfile, *models.SiteAudit) {
+	var prof models.PageProfile
+	if err := p.db.Collection("page_profiles").FindOne(ctx, bson.M{
+		"project_id": projectOID, "url": normalizePageURL(page), "version": bson.M{"$gte": profileVersion},
+	}).Decode(&prof); err != nil {
+		return nil, nil
+	}
+	audit, err := LatestAudit(ctx, p.db, projectOID)
+	if err != nil {
+		audit = nil
+	}
+	return &prof, audit
 }

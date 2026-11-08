@@ -158,6 +158,25 @@ func EnsureIndexes(database *mongo.Database, logger *zap.Logger) {
 		Options: options.Index().SetName("opportunities_project_type"),
 	})
 
+	// opportunities: one row per finding, kept across recomputations
+	create("opportunities", mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "project_id", Value: 1},
+			{Key: "key", Value: 1},
+		},
+		Options: options.Index().SetUnique(true).SetName("opportunities_project_key").
+			SetPartialFilterExpression(bson.M{"key": bson.M{"$type": "string"}}),
+	})
+
+	// opportunities: a page's signals (page analysis, Site Health)
+	create("opportunities", mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "project_id", Value: 1},
+			{Key: "page", Value: 1},
+		},
+		Options: options.Index().SetName("opportunities_project_page"),
+	})
+
 	// suggestions: per-project listing by status
 	create("suggestions", mongo.IndexModel{
 		Keys: bson.D{

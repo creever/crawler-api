@@ -86,6 +86,10 @@ type contextInput struct {
 	Related       []relatedPage
 	// RelatedFailed lists related pages that could not be read.
 	RelatedFailed []string
+	// Profile is the page as the site crawl last saw it, nil when not read.
+	Profile *models.PageProfile
+	// Audit is the latest site crawl, for how much of the site it read.
+	Audit *models.SiteAudit
 }
 
 // contextPack is the rendered prompt context. Every fact has an ID the model
@@ -140,9 +144,13 @@ func buildContextPack(in contextInput) *contextPack {
 	writeContent(c, snap)
 	writeSearchData(c, in)
 	writeRelated(c, in)
+	writeSiteStructure(c, in)
 
 	c.section("Not available")
-	c.sb.WriteString("Inbound internal links and competitor/SERP data were not collected. Make no claims about them.\n")
+	if in.Profile == nil {
+		c.sb.WriteString("The site crawl has not read this page yet, so inbound internal links are unknown. ")
+	}
+	c.sb.WriteString("Competitor/SERP data were not collected. Make no claims about it.\n")
 
 	c.Text = c.sb.String()
 	c.Coverage.CharsSent = utf8.RuneCountInString(c.Text)
@@ -579,4 +587,41 @@ func (p *Processor) latestAnalysisFingerprint(ctx context.Context, projectOID bs
 		return "", nil
 	}
 	return a.Fingerprint, err
+}
+
+// writeSiteStructure renders what the site crawl knows about the page: how
+// it is linked, whether it is in the sitemap, and the audit's issues.
+func writeSiteStructure(c *contextPack, in contextInput) {
+	prof := in.Profile
+	if prof == nil {
+		return
+	}
+	c.section("Site structure (from the site crawl)")
+	if a := in.Audit; a != nil {
+		fmt.Fprintf(&c.sb, "The crawl has read %d of %d known URLs; links count only from pages it read.\n", a.PagesFetched, a.URLsKnown)
+	}
+	c.fact("N", "Inbound internal links from read pages: %d", prof.Inbound)
+	if prof.Depth >= 0 {
+		c.fact("N", "Clicks from the home page: %d", prof.Depth)
+	} else {
+		c.fact("N", "Clicks from the home page: not reached by links from the home page")
+	}
+	if prof.InSitemap {
+		c.fact("N", "In the XML sitemap: yes")
+	} else {
+		c.fact("N", "In the XML sitemap: no")
+	}
+	if prof.BrokenLinks > 0 || prof.RedirectLinks > 0 {
+		c.fact("N", "Outgoing internal links: %d to error pages, %d to redirects", prof.BrokenLinks, prof.RedirectLinks)
+	}
+	if prof.Redirects > 0 && prof.FinalURL != "" {
+		c.fact("N", "The URL redirects %d time(s) to %s", prof.Redirects, prof.FinalURL)
+	}
+	if len(prof.Issues) > 0 {
+		codes := make([]string, 0, len(prof.Issues))
+		for _, is := range prof.Issues {
+			codes = append(codes, is.Code+" ("+is.Severity+")")
+		}
+		c.fact("N", "Site audit issues: %s", strings.Join(codes, ", "))
+	}
 }

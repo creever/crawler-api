@@ -366,13 +366,18 @@ func (h *SiteHandler) Page(c *gin.Context) {
 	for _, t := range tasks {
 		refs = append(refs, taskRef{ID: t.ID, Title: t.Title, Status: t.Status, Scope: t.Scope, Pages: t.Metrics.Pages})
 	}
+	opps := []models.Opportunity{}
+	if oc, oErr := h.db.Collection("opportunities").Find(ctx, bson.M{"project_id": id, "page": bson.M{"$in": spellings}},
+		options.Find().SetSort(bson.D{{Key: "score", Value: -1}}).SetLimit(20)); oErr == nil {
+		_ = oc.All(ctx, &opps)
+	}
 	if profile.Issues == nil {
 		profile.Issues = []models.PageIssue{}
 	}
 	if queries == nil {
 		queries = []worker.PageQueryStat{}
 	}
-	c.JSON(http.StatusOK, gin.H{"profile": profile, "queries": queries, "suggestions": linked, "tasks": refs, "links_out": len(profile.Links)})
+	c.JSON(http.StatusOK, gin.H{"profile": profile, "queries": queries, "suggestions": linked, "tasks": refs, "opportunities": opps, "links_out": len(profile.Links)})
 }
 
 // Crawl godoc

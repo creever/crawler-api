@@ -80,10 +80,115 @@ func (h *OpportunityHandler) List(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode opportunities"})
 		return
 	}
-	if opps == nil {
-		opps = []models.Opportunity{}
+	views, err := withPageStates(ctx, h.db, id, opps)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch page states"})
+		return
 	}
-	c.JSON(http.StatusOK, opps)
+	c.JSON(http.StatusOK, views)
+}
+
+// oppPageState is what the rest of the system knows about an opportunity's
+// page: whether the site crawl read it, its audit issues, and the work on it.
+type oppPageState struct {
+	Read               bool               `json:"read"`
+	Issues             []models.PageIssue `json:"issues"`
+	PendingSuggestions int                `json:"pending_suggestions"`
+	Tasks              []taskRef          `json:"tasks"`
+}
+
+// opportunityView is an opportunity with its page state.
+type opportunityView struct {
+	models.Opportunity
+	PageState *oppPageState `json:"page_state,omitempty"`
+}
+
+// finishedTaskStatuses are tasks no longer worked on.
+var finishedTaskStatuses = []models.TaskStatus{models.TaskStatusClosed, models.TaskStatusDismissed, models.TaskStatusResolved}
+
+// withPageStates adds the page state to each opportunity with a page, in a
+// fixed number of queries for the whole list.
+func withPageStates(ctx context.Context, db *mongo.Database, projectID bson.ObjectID, opps []models.Opportunity) ([]opportunityView, error) {
+	views := make([]opportunityView, 0, len(opps))
+	states := make(map[string]*oppPageState)
+	var spellings, normalized bson.A
+	for _, o := range opps {
+		views = append(views, opportunityView{Opportunity: o})
+		if o.Page == "" {
+			continue
+		}
+		key := worker.NormalizePageURL(o.Page)
+		if _, ok := states[key]; ok {
+			continue
+		}
+		states[key] = &oppPageState{Issues: []models.PageIssue{}, Tasks: []taskRef{}}
+		spellings = append(spellings, o.Page, key, key+"/")
+		normalized = append(normalized, key)
+	}
+	if len(states) == 0 {
+		return views, nil
+	}
+
+	var profiles []models.PageProfile
+	pc, err := db.Collection("page_profiles").Find(ctx, bson.M{"project_id": projectID, "url": bson.M{"$in": normalized}, "version": bson.M{"$gte": 1}},
+		options.Find().SetProjection(bson.M{"url": 1, "issues": 1}))
+	if err != nil {
+		return nil, err
+	}
+	if err = pc.All(ctx, &profiles); err != nil {
+		return nil, err
+	}
+	for _, pr := range profiles {
+		if st := states[pr.URL]; st != nil {
+			st.Read = true
+			if pr.Issues != nil {
+				st.Issues = pr.Issues
+			}
+		}
+	}
+
+	var pending []models.Suggestion
+	sc, err := db.Collection("suggestions").Find(ctx, bson.M{"project_id": projectID, "page": bson.M{"$in": spellings}, "status": models.SuggestionStatusPending},
+		options.Find().SetProjection(bson.M{"page": 1}))
+	if err != nil {
+		return nil, err
+	}
+	if err = sc.All(ctx, &pending); err != nil {
+		return nil, err
+	}
+	for _, s := range pending {
+		if st := states[worker.NormalizePageURL(s.Page)]; st != nil {
+			st.PendingSuggestions++
+		}
+	}
+
+	var tasks []models.SEOTask
+	tc, err := db.Collection("seo_tasks").Find(ctx, bson.M{"project_id": projectID, "pages": bson.M{"$in": spellings}, "status": bson.M{"$nin": finishedTaskStatuses}},
+		options.Find().SetProjection(bson.M{"title": 1, "status": 1, "scope": 1, "metrics": 1, "pages": 1}))
+	if err != nil {
+		return nil, err
+	}
+	if err = tc.All(ctx, &tasks); err != nil {
+		return nil, err
+	}
+	for _, t := range tasks {
+		ref := taskRef{ID: t.ID, Title: t.Title, Status: t.Status, Scope: t.Scope, Pages: t.Metrics.Pages}
+		added := make(map[string]bool)
+		for _, pg := range t.Pages {
+			key := worker.NormalizePageURL(pg)
+			if st := states[key]; st != nil && !added[key] {
+				added[key] = true
+				st.Tasks = append(st.Tasks, ref)
+			}
+		}
+	}
+
+	for i := range views {
+		if views[i].Page != "" {
+			views[i].PageState = states[worker.NormalizePageURL(views[i].Page)]
+		}
+	}
+	return views, nil
 }
 
 // Trigger godoc

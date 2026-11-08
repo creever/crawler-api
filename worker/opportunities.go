@@ -11,6 +11,7 @@ import (
 	"github.com/hibiken/asynq"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.uber.org/zap"
 
 	"github.com/creever/crawler-api/models"
@@ -48,6 +49,58 @@ type oppQuery struct {
 	ID          string   `bson:"_id"`
 	Impressions float64  `bson:"impressions"`
 	Pages       []string `bson:"pages"`
+}
+
+// Every opportunity is scored in the same unit, the estimated extra clicks
+// per 28 days, so that one ranked list can mix the signal types.
+const (
+	// strikingTargetPosition is where a striking-distance page could get to.
+	strikingTargetPosition = 3
+	// cannibalizationCTRGain is the CTR a query is assumed to gain once one
+	// page answers it instead of several.
+	cannibalizationCTRGain = 0.01
+	// warningIssueShare is how much of a page's clicks a warning-level audit
+	// issue is assumed to put at risk; a critical one puts all of them at risk.
+	warningIssueShare = 0.25
+)
+
+// strikingGain estimates the clicks a page at position pos would gain at
+// strikingTargetPosition. The further away it ranks, the less likely it gets
+// there, so the gain shrinks linearly from position 5 to 20.
+func strikingGain(impressions, pos float64) float64 {
+	gain := expectedCTR(strikingTargetPosition) - expectedCTR(pos)
+	if gain <= 0 {
+		return 0
+	}
+	reach := (21 - pos) / 16
+	if reach > 1 {
+		reach = 1
+	}
+	return impressions * gain * reach
+}
+
+// lowCTRGain is the clicks a query would gain at the CTR its position earns.
+func lowCTRGain(impressions, ctr, pos float64) float64 {
+	return impressions * (expectedCTR(pos) - ctr)
+}
+
+// cannibalizationGain estimates what a query gains when one page answers it.
+func cannibalizationGain(impressions float64) float64 {
+	return impressions * cannibalizationCTRGain
+}
+
+// crawlIssueGain is the clicks at risk from the worst audit severity.
+func crawlIssueGain(clicks float64, severity string) float64 {
+	if severity == models.SeverityCritical {
+		return clicks
+	}
+	return clicks * warningIssueShare
+}
+
+// opportunityKey identifies an opportunity across daily recomputations, so
+// that suggestions and the page keep pointing at the same row.
+func opportunityKey(o models.Opportunity) string {
+	return string(o.Type) + "|" + o.Query + "|" + o.Page
 }
 
 // expectedCTR is a rough average CTR curve by average position, used to flag
@@ -130,7 +183,7 @@ func (p *Processor) HandleComputeOpportunities(ctx context.Context, t *asynq.Tas
 		}
 		// Striking distance: position 5–20 with high impressions.
 		if pos >= 5 && pos <= 20 {
-			score := r.Impressions * (21 - pos)
+			score := strikingGain(r.Impressions, pos)
 			opps = append(opps, models.Opportunity{
 				ID: bson.NewObjectID(), ProjectID: projectOID,
 				Type: models.OppStrikingDistance, Query: r.ID.Query, Page: r.ID.Page,
@@ -140,7 +193,7 @@ func (p *Processor) HandleComputeOpportunities(ctx context.Context, t *asynq.Tas
 		// Low CTR for position: actual CTR below half the expected curve.
 		exp := expectedCTR(pos)
 		if pos <= 20 && ctr < exp*0.5 {
-			score := r.Impressions * (exp - ctr)
+			score := lowCTRGain(r.Impressions, ctr, pos)
 			opps = append(opps, models.Opportunity{
 				ID: bson.NewObjectID(), ProjectID: projectOID,
 				Type: models.OppLowCTR, Query: r.ID.Query, Page: r.ID.Page,
@@ -183,7 +236,7 @@ func (p *Processor) HandleComputeOpportunities(ctx context.Context, t *asynq.Tas
 			ID: bson.NewObjectID(), ProjectID: projectOID,
 			Type: models.OppCannibalization, Query: r.ID,
 			Page: r.Pages[0], Pages: r.Pages,
-			Score: r.Impressions,
+			Score: cannibalizationGain(r.Impressions),
 			Metrics: map[string]float64{
 				"impressions": r.Impressions,
 				"pages":       float64(len(r.Pages)),
@@ -208,18 +261,8 @@ func (p *Processor) HandleComputeOpportunities(ctx context.Context, t *asynq.Tas
 		opps[i].Rank = i + 1
 	}
 
-	col := p.db.Collection("opportunities")
-	if _, err = col.DeleteMany(ctx, bson.M{"project_id": projectOID}); err != nil {
-		return fmt.Errorf("clear old opportunities: %w", err)
-	}
-	if len(opps) > 0 {
-		docs := make([]interface{}, 0, len(opps))
-		for _, o := range opps {
-			docs = append(docs, o)
-		}
-		if _, err = col.InsertMany(ctx, docs); err != nil {
-			return fmt.Errorf("insert opportunities: %w", err)
-		}
+	if err = p.storeOpportunities(ctx, projectOID, opps, now); err != nil {
+		return err
 	}
 
 	p.logger.Info("opportunities computed",
@@ -325,56 +368,116 @@ func (p *Processor) aggCannibalization(ctx context.Context, projectOID bson.Obje
 	return rows, nil
 }
 
-// crawlIssueOpportunities checks the top-traffic pages' latest crawl data for
-// common SEO issues (missing title/meta, noindex, non-200 status).
-func (p *Processor) crawlIssueOpportunities(ctx context.Context, projectOID bson.ObjectID, curPages []oppPage, now time.Time) ([]models.Opportunity, error) {
-	sorted := make([]oppPage, len(curPages))
-	copy(sorted, curPages)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Clicks > sorted[j].Clicks })
-	if len(sorted) > oppCrawlIssueTopPages {
-		sorted = sorted[:oppCrawlIssueTopPages]
+// storeOpportunities writes this run's opportunities by key: a row that
+// returns keeps its id, and rows no longer found are removed.
+func (p *Processor) storeOpportunities(ctx context.Context, projectOID bson.ObjectID, opps []models.Opportunity, now time.Time) error {
+	col := p.db.Collection("opportunities")
+	if len(opps) > 0 {
+		writes := make([]mongo.WriteModel, 0, len(opps))
+		seen := make(map[string]bool, len(opps))
+		for _, o := range opps {
+			o.Key = opportunityKey(o)
+			if seen[o.Key] {
+				continue
+			}
+			seen[o.Key] = true
+			set, err := bson.Marshal(o)
+			if err != nil {
+				return fmt.Errorf("encode opportunity: %w", err)
+			}
+			var doc bson.M
+			if err = bson.Unmarshal(set, &doc); err != nil {
+				return fmt.Errorf("encode opportunity: %w", err)
+			}
+			delete(doc, "_id")
+			writes = append(writes, mongo.NewUpdateOneModel().
+				SetFilter(bson.M{"project_id": projectOID, "key": o.Key}).
+				SetUpdate(bson.M{"$set": doc, "$setOnInsert": bson.M{"_id": o.ID}}).
+				SetUpsert(true))
+		}
+		for i := 0; i < len(writes); i += 1000 {
+			j := i + 1000
+			if j > len(writes) {
+				j = len(writes)
+			}
+			if _, err := col.BulkWrite(ctx, writes[i:j], options.BulkWrite().SetOrdered(false)); err != nil {
+				return fmt.Errorf("store opportunities: %w", err)
+			}
+		}
 	}
+	if _, err := col.DeleteMany(ctx, bson.M{"project_id": projectOID, "computed_at": bson.M{"$lt": now}}); err != nil {
+		return fmt.Errorf("clear old opportunities: %w", err)
+	}
+	return nil
+}
 
+// crawlIssueOpportunities turns the site audit's critical and warning issues
+// on pages with search traffic into opportunities, weighted by the clicks at
+// risk. The page keeps its Search Console URL, so it groups with the page's
+// other signals.
+func (p *Processor) crawlIssueOpportunities(ctx context.Context, projectOID bson.ObjectID, curPages []oppPage, now time.Time) ([]models.Opportunity, error) {
+	gscURL := make(map[string]oppPage, len(curPages))
+	for _, pg := range curPages {
+		key := normalizePageURL(pg.ID)
+		if prev, ok := gscURL[key]; !ok || pg.Clicks > prev.Clicks {
+			gscURL[key] = pg
+		}
+	}
+	cursor, err := p.db.Collection("page_profiles").Find(ctx, bson.M{
+		"project_id":      projectOID,
+		"version":         bson.M{"$gte": profileVersion},
+		"issues.severity": bson.M{"$in": []string{models.SeverityCritical, models.SeverityWarning}},
+	}, options.Find().SetProjection(bson.M{"url": 1, "source_url": 1, "issues": 1}))
+	if err != nil {
+		return nil, fmt.Errorf("query page profiles: %w", err)
+	}
+	var profiles []models.PageProfile
+	if err = cursor.All(ctx, &profiles); err != nil {
+		return nil, fmt.Errorf("decode page profiles: %w", err)
+	}
 	var opps []models.Opportunity
-	for _, pg := range sorted {
-		if pg.Clicks < 3 {
+	for _, prof := range profiles {
+		pg, ok := gscURL[prof.URL]
+		if !ok || pg.Clicks < 3 {
 			continue
 		}
-		var seo models.SEOData
-		seoErr := p.db.Collection("seo_data").FindOne(ctx, bson.M{
-			"project_id": projectOID, "url": pg.ID,
-		}).Decode(&seo)
-
-		var issues []string
-		if seoErr == nil {
-			if strings.TrimSpace(seo.Title) == "" {
-				issues = append(issues, "missing title")
-			}
-			if strings.TrimSpace(seo.MetaDescription) == "" {
-				issues = append(issues, "missing meta description")
-			}
-			if strings.Contains(strings.ToLower(seo.MetaRobots), "noindex") {
-				issues = append(issues, "noindex")
-			}
-			if seo.StatusCode >= 400 {
-				issues = append(issues, fmt.Sprintf("HTTP %d", seo.StatusCode))
-			}
+		if o, found := crawlIssueOpportunity(projectOID, pg, prof.Issues, now); found {
+			opps = append(opps, o)
 		}
-
-		if len(issues) == 0 {
-			continue
-		}
-		opps = append(opps, models.Opportunity{
-			ID: bson.NewObjectID(), ProjectID: projectOID,
-			Type: models.OppCrawlIssue, Page: pg.ID,
-			Score: pg.Clicks, // weight by current traffic
-			Metrics: map[string]float64{
-				"clicks":      pg.Clicks,
-				"impressions": pg.Impressions,
-			},
-			Details:    strings.Join(issues, ", "),
-			ComputedAt: now,
-		})
+	}
+	sort.Slice(opps, func(i, j int) bool { return opps[i].Score > opps[j].Score })
+	if len(opps) > oppCrawlIssueTopPages {
+		opps = opps[:oppCrawlIssueTopPages]
 	}
 	return opps, nil
+}
+
+// crawlIssueOpportunity builds the opportunity for one page's audit issues.
+// Notices are left out: they are not worth a page analysis on their own.
+func crawlIssueOpportunity(projectOID bson.ObjectID, pg oppPage, issues []models.PageIssue, now time.Time) (models.Opportunity, bool) {
+	var codes []string
+	worst := ""
+	for _, is := range issues {
+		if is.Severity != models.SeverityCritical && is.Severity != models.SeverityWarning {
+			continue
+		}
+		codes = append(codes, is.Code)
+		if worst != models.SeverityCritical {
+			worst = is.Severity
+		}
+	}
+	if len(codes) == 0 {
+		return models.Opportunity{}, false
+	}
+	return models.Opportunity{
+		ID: bson.NewObjectID(), ProjectID: projectOID,
+		Type: models.OppCrawlIssue, Page: pg.ID,
+		Score: crawlIssueGain(pg.Clicks, worst),
+		Metrics: map[string]float64{
+			"clicks":      pg.Clicks,
+			"impressions": pg.Impressions,
+		},
+		Details:    worst + ": " + strings.Join(codes, ", "),
+		ComputedAt: now,
+	}, true
 }

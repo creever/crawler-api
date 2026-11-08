@@ -41,6 +41,7 @@ func main() {
 	database := mongoClient.Database(cfg.MongoDB)
 
 	// Ensure indexes exist (idempotent)
+	db.RunMigrations(database, logger)
 	db.EnsureIndexes(database, logger)
 
 	// Asynq client (used by the HTTP handler to enqueue tasks)
