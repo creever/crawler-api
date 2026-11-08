@@ -51,16 +51,21 @@ type SnapshotCoverage struct {
 // deliberately not stored.
 // MongoDB collection: page_snapshots (one per project × URL, TTL on expires_at)
 type PageSnapshot struct {
-	ID              bson.ObjectID `bson:"_id,omitempty"    json:"id,omitempty"`
-	ProjectID       bson.ObjectID `bson:"project_id"       json:"project_id"`
-	URL             string        `bson:"url"              json:"url"` // normalized
-	SourceURL       string        `bson:"source_url"       json:"source_url"`
-	StatusCode      int           `bson:"status_code"      json:"status_code"`
-	Title           string        `bson:"title"            json:"title"`
-	MetaDescription string        `bson:"meta_description" json:"meta_description"`
-	Canonical       string        `bson:"canonical"        json:"canonical"`
-	Robots          string        `bson:"robots"           json:"robots"`
-	Hreflang        []string      `bson:"hreflang"         json:"hreflang"`
+	ID         bson.ObjectID `bson:"_id,omitempty"    json:"id,omitempty"`
+	ProjectID  bson.ObjectID `bson:"project_id"       json:"project_id"`
+	URL        string        `bson:"url"              json:"url"` // normalized
+	SourceURL  string        `bson:"source_url"       json:"source_url"`
+	StatusCode int           `bson:"status_code"      json:"status_code"`
+	// FinalURL is where redirects ended, Redirects how many there were.
+	FinalURL        string   `bson:"final_url"    json:"final_url"`
+	Redirects       int      `bson:"redirects"    json:"redirects"`
+	XRobotsTag      string   `bson:"x_robots_tag" json:"x_robots_tag"`
+	RenderMs        int64    `bson:"render_ms"    json:"render_ms"`
+	Title           string   `bson:"title"            json:"title"`
+	MetaDescription string   `bson:"meta_description" json:"meta_description"`
+	Canonical       string   `bson:"canonical"        json:"canonical"`
+	Robots          string   `bson:"robots"           json:"robots"`
+	Hreflang        []string `bson:"hreflang"         json:"hreflang"`
 	// Lang is the page's <html lang> value.
 	Lang string `bson:"lang" json:"lang"`
 	// Availability comes from the page's structured data: in_stock,
@@ -73,9 +78,13 @@ type PageSnapshot struct {
 	Prose         []string      `bson:"prose"            json:"prose"`
 	// CategoryText is the existing descriptive text of a listing page. It is
 	// also the current value of a category_text suggestion.
-	CategoryText     string           `bson:"category_text"      json:"category_text"`
-	Listing          *ListingSummary  `bson:"listing,omitempty"  json:"listing,omitempty"`
-	ContentLinks     []PageLink       `bson:"content_links"      json:"content_links"`
+	CategoryText string          `bson:"category_text"      json:"category_text"`
+	Listing      *ListingSummary `bson:"listing,omitempty"  json:"listing,omitempty"`
+	ContentLinks []PageLink      `bson:"content_links"      json:"content_links"`
+	// Links are all same-site links of the page, menus included, as absolute
+	// URLs spelled as the page spells them. They make the site's link graph;
+	// compare them through normalizePageURL.
+	Links            []string         `bson:"links" json:"links"`
 	ImagesTotal      int              `bson:"images_total"       json:"images_total"`
 	ImagesMissingAlt int              `bson:"images_missing_alt" json:"images_missing_alt"`
 	ContentWordCount int              `bson:"content_word_count" json:"content_word_count"`

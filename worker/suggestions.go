@@ -523,20 +523,14 @@ func (p *Processor) HandleSuggestionsGenerate(ctx context.Context, t *asynq.Task
 		}
 	}
 
-	// The site-wide picture needs no AI, so a project without one still gets
-	// its pattern tasks.
-	pacer := &renderPacer{delay: p.siteCrawlDelay(ctx, project.URL), remaining: siteSampleBudget}
+	// The site crawl reads the site; the site-wide picture needs no AI, so a
+	// project without one still gets its pattern tasks.
 	if bulk {
-		read, sampleErr := p.sampleSite(ctx, &project, pacer)
-		if sampleErr != nil {
-			p.logger.Warn("site sample failed", zap.String("project_id", payload.ProjectID), zap.Error(sampleErr))
-		}
 		if refreshErr := p.refreshSiteTasks(ctx, &project, time.Now().UTC()); refreshErr != nil {
 			p.logger.Warn("site tasks not refreshed", zap.String("project_id", payload.ProjectID), zap.Error(refreshErr))
 		}
-		p.logger.Info("site sampled", zap.String("project_id", payload.ProjectID), zap.Int("pages_read", read))
 	}
-	pacer.remaining = analysisRenderBudget
+	pacer := &renderPacer{delay: p.siteCrawlDelay(ctx, project.URL), remaining: analysisRenderBudget}
 
 	ai, provider, model, err := p.suggestionAI(ctx, projectOID)
 	if err != nil {

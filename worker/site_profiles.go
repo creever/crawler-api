@@ -2,7 +2,6 @@ package worker
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -12,15 +11,14 @@ import (
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
-	"go.uber.org/zap"
 
 	"github.com/creever/crawler-api/models"
 )
 
+// profileVersion is the current profile format; see PageProfile.Version.
+const profileVersion = 1
+
 const (
-	// siteSampleBudget caps how many pages one run reads to widen the picture of
-	// the site. The picture grows across runs.
-	siteSampleBudget = 30
 	// sampleCandidates is how many of a site's top pages can be sampled.
 	sampleCandidates = 300
 	// profileFreshFor keeps a profiled page out of the sample for a while.
@@ -46,15 +44,25 @@ func pageKind(pageURL string, snap *models.PageSnapshot) string {
 			return models.PageKindArticle
 		}
 	}
-	if isListingPage(snap) {
+	product := false
+	for _, t := range snap.SchemaTypes {
+		product = product || t == "Product"
+	}
+	if isListingPage(snap) || (!product && isSmallListing(snap)) {
 		return models.PageKindListing
 	}
-	for _, t := range snap.SchemaTypes {
-		if t == "Product" {
-			return models.PageKindProduct
-		}
+	if product {
+		return models.PageKindProduct
 	}
 	return models.PageKindOther
+}
+
+// isSmallListing recognizes a listing with few items and no text of its own:
+// its item cards still outweigh everything else on the page. A product page's
+// related-items grid does not, and its Product markup rules it out first.
+func isSmallListing(snap *models.PageSnapshot) bool {
+	return snap.Listing != nil && snap.Listing.ItemCount >= listingMinCards &&
+		snap.Coverage.ListingChars >= 2*snap.Coverage.ProseChars
 }
 
 // pageGroup returns the page type findings merge on. Home, listing, product and
@@ -109,22 +117,54 @@ func contentH1(snap *models.PageSnapshot) string {
 	return ""
 }
 
+func isNoindex(snap *models.PageSnapshot) bool {
+	return strings.Contains(strings.ToLower(snap.Robots+" "+snap.XRobotsTag), "noindex")
+}
+
 func profileFromSnapshot(snap *models.PageSnapshot, now time.Time) models.PageProfile {
 	text, _ := clip(snap.CategoryText, profileTextChar)
 	kind := pageKind(snap.SourceURL, snap)
+	h1s := 0
+	for _, h := range snap.Headings {
+		if h.Level == 1 && h.Role == models.HeadingRoleContent {
+			h1s++
+		}
+	}
 	return models.PageProfile{
 		ProjectID: snap.ProjectID, URL: snap.URL, SourceURL: snap.SourceURL, StatusCode: snap.StatusCode,
 		Title: snap.Title, MetaDescription: snap.MetaDescription, H1: contentH1(snap), CategoryText: text,
 		Canonical: snap.Canonical, Robots: snap.Robots, Kind: kind, Group: pageGroup(snap.SourceURL, kind),
 		Unavailable: kind == models.PageKindProduct && isUnavailablePage(snap),
-		FetchedAt:   snap.FetchedAt, ExpiresAt: now.Add(profileTTL),
+		FinalURL:    snap.FinalURL, Redirects: snap.Redirects, Noindex: isNoindex(snap), SchemaTypes: snap.SchemaTypes,
+		H1Count: h1s, ContentWords: snap.ContentWordCount, RenderMs: snap.RenderMs, Links: snap.Links,
+		Depth: -1, Version: profileVersion,
+		FetchedAt: snap.FetchedAt, ExpiresAt: now.Add(profileTTL),
 	}
 }
 
+// crawlOwnedFields are kept when a page is read alone: the site crawl sets
+// them from the whole site.
+var crawlOwnedFields = []string{"in_sitemap", "inbound", "depth", "broken_links", "redirect_links", "impressions", "clicks", "issues"}
+
 func (p *Processor) saveProfile(ctx context.Context, snap *models.PageSnapshot, now time.Time) error {
 	profile := profileFromSnapshot(snap, now)
-	_, err := p.db.Collection("page_profiles").ReplaceOne(ctx,
-		bson.M{"project_id": profile.ProjectID, "url": profile.URL}, profile, options.Replace().SetUpsert(true))
+	raw, err := bson.Marshal(profile)
+	if err != nil {
+		return err
+	}
+	var set bson.M
+	if err = bson.Unmarshal(raw, &set); err != nil {
+		return err
+	}
+	delete(set, "_id")
+	insert := bson.M{}
+	for _, f := range crawlOwnedFields {
+		insert[f] = set[f]
+		delete(set, f)
+	}
+	_, err = p.db.Collection("page_profiles").UpdateOne(ctx,
+		bson.M{"project_id": profile.ProjectID, "url": profile.URL},
+		bson.M{"$set": set, "$setOnInsert": insert}, options.UpdateOne().SetUpsert(true))
 	return err
 }
 
@@ -209,9 +249,8 @@ func sampleableURL(raw, siteURL string) bool {
 	return sameSite(u.Host, hostOf(siteURL))
 }
 
-// siteCandidates lists a project's known URLs, strongest first: its search
-// pages, then whatever earlier crawls saw, so a site without Search Console
-// data can be read too.
+// siteCandidates lists a project's known URLs besides its sitemap, strongest
+// first: its search pages, then whatever earlier crawls saw.
 func (p *Processor) siteCandidates(ctx context.Context, project *models.Project) ([]string, error) {
 	curStart, end, _, _ := analysisWindows()
 	rows, err := p.gscPageTotals(ctx, project.ID, curStart, end, sampleCandidates)
@@ -244,45 +283,6 @@ func (p *Processor) siteCandidates(ctx context.Context, project *models.Project)
 		}
 	}
 	return out, nil
-}
-
-// sampleSite reads pages that have no fresh profile. Failures only leave a page
-// for the next run.
-func (p *Processor) sampleSite(ctx context.Context, project *models.Project, pacer *renderPacer) (int, error) {
-	candidates, err := p.siteCandidates(ctx, project)
-	if err != nil {
-		return 0, err
-	}
-	cursor, err := p.db.Collection("page_profiles").Find(ctx, bson.M{
-		"project_id": project.ID, "fetched_at": bson.M{"$gte": time.Now().UTC().Add(-profileFreshFor)},
-	}, options.Find().SetProjection(bson.M{"url": 1}))
-	if err != nil {
-		return 0, err
-	}
-	defer cursor.Close(ctx) //nolint:errcheck
-	var freshRows []struct {
-		URL string `bson:"url"`
-	}
-	if err = cursor.All(ctx, &freshRows); err != nil {
-		return 0, err
-	}
-	fresh := make(map[string]bool, len(freshRows))
-	for _, r := range freshRows {
-		fresh[r.URL] = true
-	}
-
-	read := 0
-	for _, page := range pickSample(candidates, fresh, pacer.remaining) {
-		if _, err = p.getSnapshot(ctx, project.ID, page, project.UseJS, pacer); err != nil {
-			if errors.Is(err, errRenderBudget) || ctx.Err() != nil {
-				return read, nil
-			}
-			p.logger.Warn("site sample: page not read", zap.String("page", page), zap.Error(err))
-			continue
-		}
-		read++
-	}
-	return read, nil
 }
 
 // pageTotal is one page's search totals.

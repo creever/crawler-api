@@ -52,6 +52,7 @@ func (p *Processor) Register(mux *asynq.ServeMux) {
 	mux.HandleFunc(TypeGenSuggest, p.HandleSuggestionsGenerate)
 	mux.HandleFunc(TypeVerifyTask, p.HandleTaskVerify)
 	mux.HandleFunc(TypeMeasureTasks, p.HandleTasksMeasure)
+	mux.HandleFunc(TypeSiteCrawl, p.HandleSiteCrawl)
 	mux.HandleFunc("ga4:sync", p.HandleGA4Sync)
 }
 
@@ -209,46 +210,58 @@ func (p *Processor) runRenderCrawl(ctx context.Context, config models.ProjectCon
 	return results, nil
 }
 
+// renderedPage is a page as the crawler's /render returned it.
+type renderedPage struct {
+	HTML       string
+	Status     int
+	FinalURL   string
+	Redirects  int
+	XRobotsTag string
+	RenderMs   int64
+}
+
 // fetchRender calls GET /render?url={u}&js={useJS} and returns the full HTML
-// body and the page status code.  The page status code is read from the
-// X-Prerender-Status response header (set by the crawler to convey the
-// original HTTP status of the crawled page without conflicting with the
-// crawler's own 200 success response).  When the header is absent, 200 is
-// assumed.
+// and the page's own status code.
 func (p *Processor) fetchRender(ctx context.Context, rawURL string, useJS bool) (string, int, error) {
-	endpoint := fmt.Sprintf("%s/render?url=%s&js=%v",
-		p.crawlerAddr,
-		url.QueryEscape(rawURL),
-		useJS,
-	)
+	page, err := p.fetchPage(ctx, rawURL, useJS)
+	if err != nil {
+		return "", 0, err
+	}
+	return page.HTML, page.Status, nil
+}
+
+// fetchPage calls GET /render?url={u}&js={useJS}. The page's status, final
+// URL, redirect count and robots header come in X- headers: an error status
+// is a normal answer, with the page's body.
+func (p *Processor) fetchPage(ctx context.Context, rawURL string, useJS bool) (*renderedPage, error) {
+	endpoint := fmt.Sprintf("%s/render?url=%s&js=%v", p.crawlerAddr, url.QueryEscape(rawURL), useJS)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return "", 0, fmt.Errorf("build render request: %w", err)
+		return nil, fmt.Errorf("build render request: %w", err)
 	}
-
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		return "", 0, fmt.Errorf("render request: %w", err)
+		return nil, fmt.Errorf("render request: %w", err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
-
 	if resp.StatusCode != http.StatusOK {
-		return "", 0, fmt.Errorf("crawler /render returned HTTP %s for %s", resp.Status, rawURL)
+		return nil, fmt.Errorf("crawler /render returned HTTP %s for %s", resp.Status, rawURL)
 	}
-
-	// Read the actual page status from X-Prerender-Status; default to 200.
-	pageStatus := http.StatusOK
-	if xps := resp.Header.Get("X-Prerender-Status"); xps != "" {
-		if parsed, parseErr := strconv.Atoi(xps); parseErr == nil && parsed > 0 {
-			pageStatus = parsed
-		}
+	page := &renderedPage{Status: http.StatusOK, FinalURL: rawURL, XRobotsTag: resp.Header.Get("X-Origin-Robots-Tag")}
+	if v, convErr := strconv.Atoi(resp.Header.Get("X-Prerender-Status")); convErr == nil && v > 0 {
+		page.Status = v
 	}
-
+	if v := resp.Header.Get("X-Final-URL"); v != "" {
+		page.FinalURL = v
+	}
+	page.Redirects, _ = strconv.Atoi(resp.Header.Get("X-Redirect-Count"))
+	page.RenderMs, _ = strconv.ParseInt(resp.Header.Get("X-Render-Ms"), 10, 64)
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", 0, fmt.Errorf("read render response: %w", err)
+		return nil, fmt.Errorf("read render response: %w", err)
 	}
-	return string(body), pageStatus, nil
+	page.HTML = string(body)
+	return page, nil
 }
 
 // ---------------------------------------------------------------------------

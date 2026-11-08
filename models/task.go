@@ -61,6 +61,11 @@ const (
 	IssueIntentMismatch = "intent_mismatch"
 	IssueCannibal       = "cannibalization"
 	IssueOther          = "other"
+	IssueOrphanPages    = "orphan_pages"
+	IssueBrokenLinks    = "broken_links"
+	IssueSitemap        = "sitemap_hygiene"
+	IssueNoindex        = "noindex_in_search"
+	IssueSoft404        = "soft_404"
 )
 
 // ModelIssues are the codes offered to the model.
@@ -94,6 +99,9 @@ const (
 	CheckUnique      = "unique"       // no two checked pages share the field's value
 	CheckChangedFrom = "changed_from" // Page's field is no longer Value
 	CheckStatusOK    = "status_ok"    // the page answers below HTTP 400
+	CheckHasSchema   = "has_schema"   // the page declares one of the schema types in Value, comma separated
+	CheckIndexable   = "indexable"    // the page has no noindex
+	CheckStatusError = "status_error" // Page answers 404 or 410, as a missing page should
 )
 
 // TaskCheck is one condition a recrawl tests after the harness reports done.
@@ -120,6 +128,12 @@ func (c TaskCheck) Describe() string {
 		return fmt.Sprintf("%s of %s is no longer %q", c.Field, c.Page, c.Value)
 	case CheckStatusOK:
 		return "the pages answer below HTTP 400"
+	case CheckHasSchema:
+		return fmt.Sprintf("the pages declare structured data of type %s", c.Value)
+	case CheckStatusError:
+		return fmt.Sprintf("%s answers 404 or 410", c.Page)
+	case CheckIndexable:
+		return "the pages carry no noindex, in meta robots or the X-Robots-Tag header"
 	}
 	return c.Type
 }

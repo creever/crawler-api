@@ -30,7 +30,7 @@ import (
 const (
 	snapshotTTL = 24 * time.Hour
 	// snapshotVersion invalidates cached snapshots when extraction changes.
-	snapshotVersion = 4
+	snapshotVersion = 5
 
 	// navLinkDensity marks a block as navigation: nearly all of its text is
 	// link text. Measured on cipomarket.hu: menu 0.92, product list 0.23,
@@ -49,6 +49,7 @@ const (
 
 	maxSnapshotHeadings = 40
 	maxSnapshotLinks    = 40
+	maxGraphLinks       = 300
 	maxSampleItems      = 20
 	maxListingBrands    = 20
 	maxProseChars       = 20000
@@ -892,8 +893,19 @@ func extractLinksAndImages(body *html.Node, seg *segmenter, pageURL string, snap
 	base, _ := url.Parse(pageURL)
 	cards := listingNodes(seg)
 	seen := make(map[string]bool)
+	graph := make(map[string]bool)
+	self := normalizePageURL(pageURL)
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
+		if n.Type == html.ElementNode && n.DataAtom == atom.A && len(snap.Links) < maxGraphLinks {
+			href, _ := attr(n, "href")
+			if resolved := internalLink(base, href); resolved != "" {
+				if key := normalizePageURL(resolved); key != self && !graph[key] {
+					graph[key] = true
+					snap.Links = append(snap.Links, resolved)
+				}
+			}
+		}
 		if n.Type == html.ElementNode {
 			switch n.DataAtom {
 			case atom.Img:
@@ -997,6 +1009,9 @@ func normalizePageURL(raw string) string {
 	return u.String()
 }
 
+// NormalizePageURL maps the spellings of one page URL to one key.
+func NormalizePageURL(raw string) string { return normalizePageURL(raw) }
+
 // pagePath returns the path of a page URL, the key used by GA4 rows.
 func pagePath(raw string) string {
 	u, err := url.Parse(strings.TrimSpace(raw))
@@ -1046,14 +1061,15 @@ func (p *Processor) readPage(ctx context.Context, projectOID bson.ObjectID, page
 	if err := pacer.wait(ctx); err != nil {
 		return nil, err
 	}
-	rendered, status, err := p.fetchRender(ctx, pageURL, useJS)
+	page, err := p.fetchPage(ctx, pageURL, useJS)
 	if err != nil {
 		return nil, err
 	}
-	snap, err := extractSnapshot(pageURL, status, rendered)
+	snap, err := extractSnapshot(pageURL, page.Status, page.HTML)
 	if err != nil {
 		return nil, err
 	}
+	snap.FinalURL, snap.Redirects, snap.XRobotsTag, snap.RenderMs = page.FinalURL, page.Redirects, page.XRobotsTag, page.RenderMs
 	now := time.Now().UTC()
 	snap.ProjectID = projectOID
 	snap.Version = snapshotVersion
@@ -1063,6 +1079,10 @@ func (p *Processor) readPage(ctx context.Context, projectOID bson.ObjectID, page
 		bson.M{"project_id": projectOID, "url": snap.URL}, snap, options.Replace().SetUpsert(true),
 	); err != nil {
 		return nil, fmt.Errorf("store snapshot: %w", err)
+	}
+	// The 404 probe is no page of the site, so it gets no profile.
+	if strings.Contains(snap.URL, notFoundPath) {
+		return snap, nil
 	}
 	if err = p.saveProfile(ctx, snap, now); err != nil {
 		return nil, fmt.Errorf("store profile: %w", err)

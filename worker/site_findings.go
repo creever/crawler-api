@@ -434,6 +434,76 @@ func detectFindings(profiles []models.PageProfile) []siteFinding {
 	out = append(out, tooLong(pages, models.IssueTitleTooLong, "title", "title", maxTitleChars, profileTitle)...)
 	out = append(out, tooLong(pages, models.IssueMetaTooLong, "meta_description", "meta description", maxMetaChars, profileMeta)...)
 	out = append(out, unavailablePages(profiles)...)
+	out = append(out, auditFindings(profiles)...)
+	return out
+}
+
+func withIssue(profiles []models.PageProfile, codes ...string) []models.PageProfile {
+	return where(profiles, func(pr models.PageProfile) bool {
+		for _, i := range pr.Issues {
+			for _, c := range codes {
+				if i.Code == c {
+					return true
+				}
+			}
+		}
+		return false
+	})
+}
+
+// auditFindings turns the site audit's structural issues into patterns. They
+// come from the link graph and the sitemap, which a page cannot show alone.
+func auditFindings(profiles []models.PageProfile) []siteFinding {
+	var out []siteFinding
+	out = append(out, perPageType(withIssue(profiles, AuditNoindexInSearch), minPatternPages, func(group string, ps []models.PageProfile) siteFinding {
+		return siteFinding{
+			Issue: models.IssueNoindex, Confidence: "high", Pages: ps,
+			Title:   fmt.Sprintf("Noindex on %s that should be in search", groupLabel(group)),
+			Problem: fmt.Sprintf("%d pages are in the sitemap or get search impressions, yet carry noindex, so search engines drop them.", len(ps)),
+			Goal:    "These pages are indexable, or, if they should stay out of search, they leave the sitemap and stop being linked as search pages.",
+			Avoid:   []string{"Check first whether the noindex is intentional before removing it."},
+			Checks:  []models.TaskCheck{{Type: models.CheckIndexable}},
+		}
+	})...)
+	out = append(out, perPageType(withIssue(profiles, AuditOrphan), minPatternPages, func(group string, ps []models.PageProfile) siteFinding {
+		return siteFinding{
+			Issue: models.IssueOrphanPages, Confidence: "medium", Pages: ps,
+			Title:   fmt.Sprintf("No internal link leads to %s", groupLabel(group)),
+			Problem: fmt.Sprintf("%d pages are in the sitemap or in search, but no page read links to them, so visitors and crawlers can hardly reach them.", len(ps)),
+			Goal:    "Each of these pages is linked from a relevant page of the site, such as its category or a related page.",
+		}
+	})...)
+	out = append(out, perPageType(withIssue(profiles, AuditBrokenLinks), minPatternPages, func(group string, ps []models.PageProfile) siteFinding {
+		return siteFinding{
+			Issue: models.IssueBrokenLinks, Confidence: "high", Pages: ps,
+			Title:   fmt.Sprintf("Links to broken pages from %s", groupLabel(group)),
+			Problem: fmt.Sprintf("%d pages link to pages of the site that answer with an error. When many pages share the link, it usually sits in a shared menu or block.", len(ps)),
+			Goal:    "Links point to working pages: fixed, or removed where the target is gone for good.",
+		}
+	})...)
+	out = append(out, perPageType(withIssue(profiles, AuditRedirected), minPatternPages, func(group string, ps []models.PageProfile) siteFinding {
+		return siteFinding{
+			Issue: models.IssueSitemap, Confidence: "high", Pages: ps,
+			Title:   fmt.Sprintf("Redirecting URLs in the sitemap: %s", groupLabel(group)),
+			Problem: fmt.Sprintf("%d URLs in the sitemap redirect elsewhere. A sitemap should list the final, indexable URLs only.", len(ps)),
+			Goal:    "The sitemap lists the redirect targets instead of these URLs.",
+		}
+	})...)
+	for kind, types := range expectedSchema {
+		missing := where(withIssue(profiles, AuditMissingSchema), func(pr models.PageProfile) bool { return pr.Kind == kind })
+		if len(missing) < minPatternPages {
+			continue
+		}
+		out = append(out, siteFinding{
+			Issue: models.IssueStructuredData, KeyPart: kind, Scope: models.TaskScopeGroup, Group: kind,
+			Confidence: "high", Pages: missing,
+			Title:   fmt.Sprintf("No %s structured data on %s", types[0], groupLabel(kind)),
+			Problem: fmt.Sprintf("%d %s declare no %s structured data, so they cannot show rich results.", len(missing), groupLabel(kind), strings.Join(types, " or ")),
+			Goal:    fmt.Sprintf("Every page of this type outputs valid %s JSON-LD from the data the page shows.", types[0]),
+			Avoid:   []string{"Do not mark up data the page does not show, such as ratings or prices that are not visible."},
+			Checks:  []models.TaskCheck{{Type: models.CheckHasSchema, Value: strings.Join(types, ",")}},
+		})
+	}
 	return out
 }
 

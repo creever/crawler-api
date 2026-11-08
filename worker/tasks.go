@@ -20,6 +20,7 @@ const (
 	TypeGenSuggest    = "suggestions:generate"
 	TypeVerifyTask    = "tasks:verify"
 	TypeMeasureTasks  = "tasks:measure"
+	TypeSiteCrawl     = "site:crawl"
 )
 
 // CrawlPayload is the JSON payload stored in every crawl task.

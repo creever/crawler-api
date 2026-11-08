@@ -33,13 +33,13 @@ const (
 
 // pageQueryStat is one query of a page, current window vs previous window.
 type pageQueryStat struct {
-	Query           string
-	Clicks          float64
-	Impressions     float64
-	Position        float64
-	PrevClicks      float64
-	PrevImpressions float64
-	PrevPosition    float64
+	Query           string  `json:"query"`
+	Clicks          float64 `json:"clicks"`
+	Impressions     float64 `json:"impressions"`
+	Position        float64 `json:"position"`
+	PrevClicks      float64 `json:"prev_clicks"`
+	PrevImpressions float64 `json:"prev_impressions"`
+	PrevPosition    float64 `json:"prev_position"`
 }
 
 // pageDeviceStat is a page's GSC performance on one device type.

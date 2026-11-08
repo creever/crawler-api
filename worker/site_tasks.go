@@ -819,6 +819,12 @@ func evaluateChecks(checks []models.TaskCheck, snaps []*models.PageSnapshot) []s
 				ok = normalizedText(value) != normalizedText(c.Value)
 			case models.CheckStatusOK:
 				ok = s.StatusCode < 400
+			case models.CheckHasSchema:
+				ok = hasAnyType(s.SchemaTypes, strings.Split(c.Value, ","))
+			case models.CheckIndexable:
+				ok = !isNoindex(s)
+			case models.CheckStatusError:
+				ok = s.StatusCode >= 400 && (s.FinalURL == "" || normalizePageURL(s.FinalURL) == s.URL)
 			}
 			if !ok {
 				fail(c, s.SourceURL)

@@ -10,6 +10,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
+	"github.com/creever/crawler-api/middleware"
 	"github.com/creever/crawler-api/models"
 )
 
@@ -35,20 +36,26 @@ func (h *SEOHandler) col() *mongo.Collection {
 // @Success      200  {array}   models.SEOData
 // @Router       /api/v1/seo [get]
 func (h *SEOHandler) List(c *gin.Context) {
-	filter := bson.M{}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Only the caller's projects: an admin sees all, others their own.
+	owned, err := accessibleProjectIDs(ctx, c, h.db)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch projects"})
+		return
+	}
+	filter := bson.M{"project_id": bson.M{"$in": owned}}
 	if pid := c.Query("project_id"); pid != "" {
 		oid, err := bson.ObjectIDFromHex(pid)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid project_id"})
 			return
 		}
-		filter["project_id"] = oid
+		filter = bson.M{"project_id": oid, "$and": bson.A{bson.M{"project_id": bson.M{"$in": owned}}}}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	opts := options.Find().SetSort(bson.D{{Key: "crawled_at", Value: -1}})
+	opts := options.Find().SetSort(bson.D{{Key: "crawled_at", Value: -1}}).SetLimit(1000)
 	cursor, err := h.col().Find(ctx, filter, opts)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch seo data"})
@@ -86,7 +93,12 @@ func (h *SEOHandler) Get(c *gin.Context) {
 	defer cancel()
 
 	var record models.SEOData
-	if err = h.col().FindOne(ctx, bson.M{"_id": id}).Decode(&record); err != nil {
+	owned, err := accessibleProjectIDs(ctx, c, h.db)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch projects"})
+		return
+	}
+	if err = h.col().FindOne(ctx, bson.M{"_id": id, "project_id": bson.M{"$in": owned}}).Decode(&record); err != nil {
 		if err == mongo.ErrNoDocuments {
 			c.JSON(http.StatusNotFound, gin.H{"error": "seo record not found"})
 			return
@@ -120,6 +132,10 @@ func (h *SEOHandler) Create(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	if err := h.db.Collection("projects").FindOne(ctx, gscProjectFilter(c, data.ProjectID)).Err(); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "project not found"})
+		return
+	}
 	if _, err := h.col().InsertOne(ctx, data); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to store seo data"})
 		return
@@ -144,7 +160,12 @@ func (h *SEOHandler) Delete(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	result, err := h.col().DeleteOne(ctx, bson.M{"_id": id})
+	owned, err := accessibleProjectIDs(ctx, c, h.db)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch projects"})
+		return
+	}
+	result, err := h.col().DeleteOne(ctx, bson.M{"_id": id, "project_id": bson.M{"$in": owned}})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete seo record"})
 		return
@@ -154,4 +175,27 @@ func (h *SEOHandler) Delete(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+// accessibleProjectIDs lists the projects the caller may read.
+func accessibleProjectIDs(ctx context.Context, c *gin.Context, db *mongo.Database) ([]bson.ObjectID, error) {
+	filter := bson.M{}
+	if !middleware.IsAdmin(c) {
+		filter["owner_id"] = middleware.GetUserID(c)
+	}
+	cursor, err := db.Collection("projects").Find(ctx, filter, options.Find().SetProjection(bson.M{"_id": 1}))
+	if err != nil {
+		return nil, err
+	}
+	var rows []struct {
+		ID bson.ObjectID `bson:"_id"`
+	}
+	if err = cursor.All(ctx, &rows); err != nil {
+		return nil, err
+	}
+	ids := make([]bson.ObjectID, 0, len(rows))
+	for _, r := range rows {
+		ids = append(ids, r.ID)
+	}
+	return ids, nil
 }

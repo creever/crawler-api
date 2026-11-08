@@ -79,6 +79,24 @@ func EnsureIndexes(database *mongo.Database, logger *zap.Logger) {
 		Options: options.Index().SetName("seo_tasks_project_pages"),
 	})
 
+	// site_urls: a project's URL inventory, the site crawl's frontier
+	create("site_urls", mongo.IndexModel{
+		Keys:    bson.D{{Key: "project_id", Value: 1}, {Key: "url", Value: 1}},
+		Options: options.Index().SetUnique(true).SetName("site_urls_project_url"),
+	})
+
+	// site_audits: newest audit first, per project
+	create("site_audits", mongo.IndexModel{
+		Keys:    bson.D{{Key: "project_id", Value: 1}, {Key: "started_at", Value: -1}},
+		Options: options.Index().SetName("site_audits_project_started"),
+	})
+
+	// page_profiles: the page explorer sorts by reach
+	create("page_profiles", mongo.IndexModel{
+		Keys:    bson.D{{Key: "project_id", Value: 1}, {Key: "impressions", Value: -1}},
+		Options: options.Index().SetName("page_profiles_project_impressions"),
+	})
+
 	// suggestions: earlier decisions on a finding
 	create("suggestions", mongo.IndexModel{
 		Keys:    bson.D{{Key: "project_id", Value: 1}, {Key: "finding_key", Value: 1}},
