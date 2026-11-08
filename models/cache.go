@@ -12,6 +12,8 @@ const (
 	CacheSourceStale  = "stale"  // a bot was served an old render, which was then refreshed
 	CacheSourceCrawl  = "crawl"  // the site crawl rendered the page with JavaScript anyway
 	CacheSourceManual = "manual" // a person asked for a refresh
+	CacheSourceWarm   = "warm"   // the site crawl stored a page with search traffic
+	CacheSourceTask   = "task"   // a finished task changed the page
 )
 
 // CacheEntry is the prerendered HTML of one page, served to bots by

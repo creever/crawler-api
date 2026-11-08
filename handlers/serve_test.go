@@ -24,10 +24,10 @@ import (
 func TestAgentNames(t *testing.T) {
 	cases := map[string]string{
 		"Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; GPTBot/1.2; +https://openai.com/gptbot": "GPTBot",
-		"Mozilla/5.0 (compatible; ClaudeBot/1.0; +claudebot@anthropic.com)":                                   "ClaudeBot",
-		"Mozilla/5.0 (Linux; Android 6.0.1) Chrome/120 Mobile Safari/537.36 (compatible; Googlebot/2.1)":     "Googlebot",
-		"Mozilla/5.0 (compatible; PerplexityBot/1.0)":                                                         "PerplexityBot",
-		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120 Safari/537.36":                                  "",
+		"Mozilla/5.0 (compatible; ClaudeBot/1.0; +claudebot@anthropic.com)":                                      "ClaudeBot",
+		"Mozilla/5.0 (Linux; Android 6.0.1) Chrome/120 Mobile Safari/537.36 (compatible; Googlebot/2.1)":         "Googlebot",
+		"Mozilla/5.0 (compatible; PerplexityBot/1.0)":                                                            "PerplexityBot",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120 Safari/537.36":                                     "",
 	}
 	for ua, want := range cases {
 		if got := agentName(ua); got != want {
@@ -134,5 +134,17 @@ func TestIntegrationServe(t *testing.T) {
 		len(stats.Agents) != 1 || stats.Agents[0].Agent != "GPTBot" || stats.Cache.Entries != 2 || len(stats.Daily) != 14 ||
 		len(stats.TopPages) != 2 || stats.TopPages[0].Requests != 3 {
 		t.Fatalf("stats: %+v", stats)
+	}
+}
+
+func TestSecretsAreNeverReadBack(t *testing.T) {
+	for key, secret := range map[string]bool{"smtp_password": true, "anthropic_api_key": true, "mcp_token_hash": true, "smtp_host": false, "ai_model": false} {
+		got := maskSecret(key, "value")
+		if secret != (got == settingMask) {
+			t.Errorf("%s: %q", key, got)
+		}
+	}
+	if maskSecret("smtp_password", "") != "" {
+		t.Error("an unset secret stays empty")
 	}
 }

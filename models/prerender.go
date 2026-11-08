@@ -26,12 +26,12 @@ const (
 // PrerenderData is one request to /prerender.
 // MongoDB collection: prerender_data (kept for 90 days)
 type PrerenderData struct {
-	ID         bson.ObjectID `bson:"_id,omitempty"    json:"id,omitempty"`
-	ProjectID  bson.ObjectID `bson:"project_id"       json:"project_id"`
-	URL        string        `bson:"url"              json:"url"`
+	ID        bson.ObjectID `bson:"_id,omitempty"    json:"id,omitempty"`
+	ProjectID bson.ObjectID `bson:"project_id"       json:"project_id"`
+	URL       string        `bson:"url"              json:"url"`
 	// Key is the normalized URL: the spellings of a page count as one.
-	Key        string        `bson:"key"              json:"key"`
-	StatusCode int           `bson:"status_code"      json:"status_code"`
+	Key        string `bson:"key"              json:"key"`
+	StatusCode int    `bson:"status_code"      json:"status_code"`
 	// RenderTimeMs is how long the caller waited for the answer.
 	RenderTimeMs  int64         `bson:"render_time_ms"   json:"render_time_ms"`
 	FromCache     bool          `bson:"from_cache"       json:"from_cache"`

@@ -68,6 +68,7 @@ func main() {
 	worker.StartGA4Scheduler(database, asynqClient, logger)
 	worker.StartTaskMeasureScheduler(database, asynqClient, logger)
 	worker.StartSiteCrawlScheduler(database, asynqClient, logger)
+	worker.StartDigestScheduler(database, asynqClient, logger)
 
 	// GIN
 	gin.SetMode(cfg.GinMode)

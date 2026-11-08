@@ -43,18 +43,43 @@ const (
 	siteURLWriteSize = 1000
 )
 
-// robotsRules is what robots.txt asks of a crawler without a group of its own.
+// robotsRules is what robots.txt asks of one crawler.
 type robotsRules struct {
 	Delay    time.Duration
 	Allow    []string
 	Disallow []string
 	Sitemaps []string
+	// Raw is the file, so that other crawlers' rules can be read from it.
+	Raw string
 }
 
 // parseRobots reads the "*" group and the sitemap lines of a robots.txt.
 func parseRobots(body string) robotsRules {
-	rules := robotsRules{Delay: parseCrawlDelay(body)}
-	inStar, lastWasAgent := false, false
+	return parseRobotsFor(body, "*")
+}
+
+// robotsGroup is one group of a robots.txt.
+type robotsGroup struct {
+	agents          []string
+	allow, disallow []string
+}
+
+func (g *robotsGroup) names(agent string) bool {
+	for _, a := range g.agents {
+		if strings.EqualFold(a, agent) {
+			return true
+		}
+	}
+	return false
+}
+
+// parseRobotsFor reads the rules that apply to one crawler: the groups naming
+// it, or the "*" groups when none does.
+func parseRobotsFor(body, agent string) robotsRules {
+	rules := robotsRules{Delay: parseCrawlDelay(body), Raw: body}
+	var groups []*robotsGroup
+	var cur *robotsGroup
+	lastWasAgent := false
 	for _, line := range strings.Split(body, "\n") {
 		if i := strings.IndexByte(line, '#'); i >= 0 {
 			line = line[:i]
@@ -67,10 +92,11 @@ func parseRobots(body string) robotsRules {
 		switch key {
 		case "user-agent":
 			// Consecutive user-agent lines share one group.
-			if !lastWasAgent {
-				inStar = false
+			if !lastWasAgent || cur == nil {
+				cur = &robotsGroup{}
+				groups = append(groups, cur)
 			}
-			inStar = inStar || value == "*"
+			cur.agents = append(cur.agents, value)
 			lastWasAgent = true
 			continue
 		case "sitemap":
@@ -78,17 +104,49 @@ func parseRobots(body string) robotsRules {
 				rules.Sitemaps = appendUnique(rules.Sitemaps, value)
 			}
 		case "allow":
-			if inStar && value != "" {
-				rules.Allow = append(rules.Allow, value)
+			if cur != nil && value != "" {
+				cur.allow = append(cur.allow, value)
 			}
 		case "disallow":
-			if inStar && value != "" {
-				rules.Disallow = append(rules.Disallow, value)
+			if cur != nil && value != "" {
+				cur.disallow = append(cur.disallow, value)
 			}
 		}
 		lastWasAgent = false
 	}
+	named := false
+	for _, g := range groups {
+		named = named || g.names(agent)
+	}
+	target := agent
+	if !named {
+		target = "*"
+	}
+	for _, g := range groups {
+		if g.names(target) {
+			rules.Allow = append(rules.Allow, g.allow...)
+			rules.Disallow = append(rules.Disallow, g.disallow...)
+		}
+	}
 	return rules
+}
+
+// aiAgents are the robots.txt names of the crawlers behind AI assistants and
+// AI training. Google-Extended and Applebot-Extended are permission tokens
+// only: they never fetch a page themselves.
+var aiAgents = []string{
+	"GPTBot", "OAI-SearchBot", "ChatGPT-User", "ClaudeBot", "Claude-SearchBot", "Claude-User",
+	"PerplexityBot", "Perplexity-User", "Google-Extended", "Applebot-Extended",
+	"Meta-ExternalAgent", "Amazonbot", "Bytespider", "CCBot",
+}
+
+// aiAccess says which AI crawlers robots.txt lets at the site's home page.
+func aiAccess(rules robotsRules, siteURL string) []models.AIAccess {
+	out := make([]models.AIAccess, 0, len(aiAgents))
+	for _, agent := range aiAgents {
+		out = append(out, models.AIAccess{Agent: agent, Allowed: parseRobotsFor(rules.Raw, agent).allowed(siteURL)})
+	}
+	return out
 }
 
 // robotsMatch returns the length of the pattern if it matches path, else -1.
@@ -420,6 +478,7 @@ func (p *Processor) HandleSiteCrawl(ctx context.Context, t *asynq.Task) error {
 		return err
 	}
 	run, crawlErr := p.crawlSite(ctx, &project, audit.StartedAt)
+	audit.AIAccess = run.AIAccess
 	audit.PagesReadNow = run.Read
 	audit.NotFound = run.NotFound
 	audit.Rendering = run.Rendering
@@ -445,6 +504,13 @@ func (p *Processor) HandleSiteCrawl(ctx context.Context, t *asynq.Task) error {
 	if err = p.recordNotFoundProbe(ctx, &project, probe, finished); err != nil {
 		p.logger.Warn("soft 404 task not updated", zap.String("project_id", payload.ProjectID), zap.Error(err))
 	}
+	if err = p.recordJSDependence(ctx, &project, run.Rendering, finished); err != nil {
+		p.logger.Warn("JavaScript task not updated", zap.String("project_id", payload.ProjectID), zap.Error(err))
+	}
+	if err = p.recordBotTraps(ctx, &project, finished); err != nil {
+		p.logger.Warn("bot trap tasks not updated", zap.String("project_id", payload.ProjectID), zap.Error(err))
+	}
+	p.enqueueVitalsIfDue(ctx, project.ID, finished)
 	p.logger.Info("site crawl completed", zap.String("project_id", payload.ProjectID), zap.Int("pages_read", run.Read),
 		zap.Float64("score", audit.Score), zap.Int("pages", audit.PagesFetched))
 	return nil
@@ -462,8 +528,14 @@ func (p *Processor) recordNotFoundProbe(ctx context.Context, project *models.Pro
 		}
 		return RebalanceTasks(ctx, p.db, project.ID)
 	}
+	return p.resolveSiteTask(ctx, project.ID, models.IssueSoft404, now)
+}
+
+// resolveSiteTask closes a site-wide task whose problem is gone, unless
+// someone is already working on it.
+func (p *Processor) resolveSiteTask(ctx context.Context, projectID bson.ObjectID, issue string, now time.Time) error {
 	_, err := p.db.Collection("seo_tasks").UpdateMany(ctx, bson.M{
-		"project_id": project.ID, "key": taskKey(models.IssueSoft404, "site"),
+		"project_id": projectID, "key": taskKey(issue, "site"),
 		"status": bson.M{"$in": []models.TaskStatus{models.TaskStatusQueued, models.TaskStatusOpen, models.TaskStatusReopened}},
 	}, bson.M{"$set": bson.M{"status": models.TaskStatusResolved, "updated_at": now}})
 	return err
@@ -474,6 +546,7 @@ type siteCrawlRun struct {
 	Read      int
 	NotFound  *models.NotFoundProbe
 	Rendering *models.RenderingProbe
+	AIAccess  []models.AIAccess
 }
 
 // crawlSite gathers the site's URLs and reads up to the budget. Links found on
@@ -481,6 +554,7 @@ type siteCrawlRun struct {
 func (p *Processor) crawlSite(ctx context.Context, project *models.Project, now time.Time) (siteCrawlRun, error) {
 	var run siteCrawlRun
 	rules := p.siteRobots(ctx, project.URL)
+	run.AIAccess = aiAccess(rules, project.URL)
 	sitemapPages, sitemapOK := p.loadSitemaps(ctx, project.URL, rules.Sitemaps)
 	if err := p.recordURLs(ctx, project.ID, sitemapPages, models.URLSourceSitemap, now); err != nil {
 		return run, fmt.Errorf("record sitemap URLs: %w", err)
@@ -563,10 +637,18 @@ func (p *Processor) crawlSite(ctx context.Context, project *models.Project, now 
 	if run.Rendering != nil {
 		useJS = run.Rendering.Mode == renderModeJS
 	}
+	var warm map[string]bool
+	if useJS {
+		warm = p.warmSet(ctx, project, impressions, now)
+	}
 	for len(queue) > 0 {
 		page := queue[0]
 		queue = queue[1:]
-		snap, readErr := p.readPage(ctx, project.ID, page, useJS, pacer)
+		snap, readErr := p.readPageThen(ctx, project.ID, page, useJS, pacer, func(rendered *renderedPage) {
+			if warm[normalizePageURL(page)] {
+				p.warmCache(ctx, project.ID, page, rendered)
+			}
+		})
 		if errors.Is(readErr, errRenderBudget) || ctx.Err() != nil {
 			break
 		}
@@ -615,8 +697,8 @@ const (
 	// to a page whose content is all in the HTML, and that should not send a
 	// whole crawl through Chrome.
 	renderingLinksShare = 0.5
-	renderModeJS          = "js"
-	renderModeHTML        = "html"
+	renderModeJS        = "js"
+	renderModeHTML      = "html"
 )
 
 // renderingProbe reads the home page and the first pages of the queue with
@@ -642,6 +724,11 @@ func (p *Processor) renderingProbe(ctx context.Context, project *models.Project,
 			continue
 		}
 		probe.Pages = append(probe.Pages, page)
+		probe.Samples = append(probe.Samples, models.RenderingSample{
+			URL: page, Title: rendered.Title,
+			HTMLWords: plain.TotalWordCount, JSWords: rendered.TotalWordCount,
+			HTMLLinks: len(plain.Links), JSLinks: len(rendered.Links),
+		})
 		probe.HTMLWords += plain.TotalWordCount
 		probe.JSWords += rendered.TotalWordCount
 		probe.HTMLLinks += len(plain.Links)

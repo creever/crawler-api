@@ -26,7 +26,7 @@ func TestNeedsJS(t *testing.T) {
 	}{
 		{models.RenderingProbe{HTMLWords: 950, JSWords: 1000, HTMLLinks: 80, JSLinks: 82}, false},
 		{models.RenderingProbe{HTMLWords: 40, JSWords: 1000, HTMLLinks: 2, JSLinks: 80}, true},
-		{models.RenderingProbe{HTMLWords: 1000, JSWords: 1000, HTMLLinks: 10, JSLinks: 80}, true}, // links come from JS
+		{models.RenderingProbe{HTMLWords: 1000, JSWords: 1000, HTMLLinks: 10, JSLinks: 80}, true},  // links come from JS
 		{models.RenderingProbe{HTMLWords: 950, JSWords: 954, HTMLLinks: 260, JSLinks: 350}, false}, // a script-built menu
 		{models.RenderingProbe{}, false},
 	}
@@ -169,5 +169,132 @@ func TestIntegrationSiteCrawlChoosesRenderingAndKnowsBotPages(t *testing.T) {
 	}
 	if n, _ := database.Collection("page_profiles").CountDocuments(ctx, bson.M{"project_id": project.ID, "url": normalizePageURL(site.URL + "/only-bots-know")}); n != 1 {
 		t.Fatal("a page bots ask for should be read")
+	}
+}
+
+func TestStripScriptsKeepsStructuredData(t *testing.T) {
+	src := `<!doctype html><html><head><title>T &amp; S</title>` +
+		`<link rel="modulepreload" href="/a.js"><link rel="preload" as="script" href="/b.js"><link rel="stylesheet" href="/s.css">` +
+		`<script src="/app.js"></script><script>if (a < b) { document.write("</div>") }</script>` +
+		`<SCRIPT TYPE="application/ld+json">{"@type":"Product"}</SCRIPT></head>` +
+		`<body data-x="1"><div>Text <b>here</b></div><script type="module">boot()</script></body></html>`
+	want := `<!doctype html><html><head><title>T &amp; S</title><link rel="stylesheet" href="/s.css">` +
+		`<SCRIPT TYPE="application/ld+json">{"@type":"Product"}</SCRIPT></head>` +
+		`<body data-x="1"><div>Text <b>here</b></div></body></html>`
+	if got := stripScripts(src); got != want {
+		t.Fatalf("got  %s\nwant %s", got, want)
+	}
+}
+
+func TestRobotsForOneCrawler(t *testing.T) {
+	body := "User-agent: *\nDisallow: /private\n\nUser-agent: GPTBot\nUser-agent: CCBot\nDisallow: /\n\nUser-agent: ClaudeBot\nDisallow:\n"
+	rules := parseRobots(body)
+	got := map[string]bool{}
+	for _, a := range aiAccess(rules, "https://x.hu/") {
+		got[a.Agent] = a.Allowed
+	}
+	if got["GPTBot"] || got["CCBot"] {
+		t.Fatalf("a crawler disallowed by name is blocked: %v", got)
+	}
+	if !got["ClaudeBot"] || !got["PerplexityBot"] {
+		t.Fatalf("an empty Disallow and the * group allow the home page: %v", got)
+	}
+	if parseRobotsFor(body, "ClaudeBot").allowed("https://x.hu/private") != true {
+		t.Fatal("a crawler with its own group ignores the * group")
+	}
+	if rules.allowed("https://x.hu/private") {
+		t.Fatal("the * group still applies to others")
+	}
+}
+
+func TestFindBotTraps(t *testing.T) {
+	prof := func(key string, canonical string, noindex bool, impressions float64) *models.PageProfile {
+		return &models.PageProfile{URL: key, Canonical: canonical, Noindex: noindex, Impressions: impressions}
+	}
+	stats := []botPageStat{
+		{Key: "https://x.hu/gone", URL: "https://x.hu/gone", Requests: 9, Status: 404},
+		{Key: "https://x.hu/once", URL: "https://x.hu/once", Requests: 1, Status: 404},
+		{Key: "https://x.hu/a?color=red", URL: "https://x.hu/a?color=red", Requests: 40, Status: 200},
+		{Key: "https://x.hu/a?page=2", URL: "https://x.hu/a?page=2", Requests: 30, Status: 200},
+		{Key: "https://x.hu/earns?x=1", URL: "https://x.hu/earns?x=1", Requests: 5, Status: 200},
+		{Key: "https://x.hu/hidden", URL: "https://x.hu/hidden", Requests: 20, Status: 200},
+		{Key: "https://x.hu/dup", URL: "https://x.hu/dup", Requests: 10, Status: 200},
+		{Key: "https://x.hu/good", URL: "https://x.hu/good", Requests: 30, Status: 200},
+	}
+	profiles := map[string]*models.PageProfile{
+		"https://x.hu/earns?x=1": prof("https://x.hu/earns?x=1", "", false, 100),
+		"https://x.hu/hidden":    prof("https://x.hu/hidden", "", true, 0),
+		"https://x.hu/dup":       prof("https://x.hu/dup", "https://x.hu/good", false, 0),
+		"https://x.hu/good":      prof("https://x.hu/good", "https://x.hu/good", false, 50),
+	}
+	got := findBotTraps(stats, profiles)
+	if len(got.Errors) != 1 || got.Errors[0].Key != "https://x.hu/gone" || got.ErrorRequests != 9 {
+		t.Fatalf("errors: %+v", got.Errors)
+	}
+	if len(got.Waste) != 3 || got.WasteRequests != 70 || got.Waste[0].Requests != 40 || !got.wasteIsATask() {
+		t.Fatalf("waste: %+v (%d)", got.Waste, got.WasteRequests)
+	}
+	small := findBotTraps(stats[2:3], nil)
+	if small.wasteIsATask() {
+		t.Fatal("a few requests are no task")
+	}
+}
+
+func TestTopImpressionKeys(t *testing.T) {
+	got := topImpressionKeys(map[string]float64{"a": 1, "b": 9, "c": 5}, 2)
+	if len(got) != 2 || !got["b"] || !got["c"] {
+		t.Fatalf("%v", got)
+	}
+}
+
+func TestIntegrationFinishedTaskRefreshesItsCachedPages(t *testing.T) {
+	database := integrationDB(t)
+	ctx := context.Background()
+	p := NewProcessor(database, zap.NewNop(), "http://127.0.0.1:1", nil)
+	project := bson.NewObjectID()
+	now := time.Now().UTC()
+	fresh := now.Add(time.Hour)
+	for _, page := range []string{"https://x.hu/a", "https://x.hu/other"} {
+		if _, err := database.Collection("cache_entries").InsertOne(ctx, models.CacheEntry{
+			ID: bson.NewObjectID(), ProjectID: project, Key: CacheKey(page), URL: page, FullHTML: "<html></html>", ExpiresAt: fresh, PurgeAt: fresh,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p.refreshTaskPages(ctx, &models.SEOTask{ProjectID: project, Pages: []string{"https://www.x.hu/a/"}}, now)
+	a, _ := LookupCache(ctx, database, project, "https://x.hu/a")
+	other, _ := LookupCache(ctx, database, project, "https://x.hu/other")
+	if a.ExpiresAt.After(now.Add(time.Second)) {
+		t.Fatalf("the changed page should be stale: %v", a.ExpiresAt)
+	}
+	if !other.ExpiresAt.After(now) {
+		t.Fatal("other pages stay fresh")
+	}
+}
+
+func TestIntegrationWarmCacheOnlyForUsedPrerender(t *testing.T) {
+	database := integrationDB(t)
+	ctx := context.Background()
+	p := NewProcessor(database, zap.NewNop(), "http://127.0.0.1:1", nil)
+	project := &models.Project{ID: bson.NewObjectID(), URL: "https://x.hu/"}
+	now := time.Now().UTC()
+	impressions := map[string]float64{"https://x.hu/a": 10}
+	if got := p.warmSet(ctx, project, impressions, now); got != nil {
+		t.Fatalf("no bots use /prerender yet: %v", got)
+	}
+	if _, err := database.Collection("prerender_data").InsertOne(ctx, models.PrerenderData{ID: bson.NewObjectID(), ProjectID: project.ID, RequesterType: models.RequesterTypeBot, CachedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.warmSet(ctx, project, impressions, now); !got["https://x.hu/a"] {
+		t.Fatalf("warm set: %v", got)
+	}
+	p.warmCache(ctx, project.ID, "https://x.hu/a", &renderedPage{HTML: "<html><script>x()</script><p>Hi</p></html>", Status: 200})
+	p.warmCache(ctx, project.ID, "https://x.hu/gone", &renderedPage{HTML: "<html></html>", Status: 404})
+	e, _ := LookupCache(ctx, database, project.ID, "https://x.hu/a")
+	if e == nil || e.Source != models.CacheSourceWarm || strings.Contains(e.FullHTML, "<script") {
+		t.Fatalf("warm entry: %+v", e)
+	}
+	if gone, _ := LookupCache(ctx, database, project.ID, "https://x.hu/gone"); gone != nil {
+		t.Fatal("an error page is not warmed")
 	}
 }

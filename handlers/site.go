@@ -412,3 +412,53 @@ func (h *SiteHandler) Crawl(c *gin.Context) {
 	}
 	c.JSON(http.StatusAccepted, gin.H{"status": "enqueued"})
 }
+
+// Vitals godoc
+// @Summary      Core Web Vitals of the project's page types, latest run
+// @Tags         projects
+// @Produce      json
+// @Param        id  path  string  true  "Project ID"
+// @Router       /api/v1/projects/{id}/site/vitals [get]
+func (h *SiteHandler) Vitals(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	id, ok := projectFromRequest(ctx, c, h.db)
+	if !ok {
+		return
+	}
+	rows, err := worker.LatestVitals(ctx, h.db, id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch vitals"})
+		return
+	}
+	c.JSON(http.StatusOK, rows)
+}
+
+// RunVitals godoc
+// @Summary      Measure the project's page types now
+// @Tags         projects
+// @Produce      json
+// @Param        id  path  string  true  "Project ID"
+// @Router       /api/v1/projects/{id}/site/vitals [post]
+func (h *SiteHandler) RunVitals(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	id, ok := projectFromRequest(ctx, c, h.db)
+	if !ok {
+		return
+	}
+	task, err := worker.NewSiteVitalsTask(id.Hex())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to build task"})
+		return
+	}
+	if _, err = h.asynqClient.EnqueueContext(ctx, task); err != nil {
+		if errors.Is(err, asynq.ErrDuplicateTask) {
+			c.JSON(http.StatusConflict, gin.H{"error": "a measurement started within the last hour"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to enqueue task"})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"status": "enqueued"})
+}

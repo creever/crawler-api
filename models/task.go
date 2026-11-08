@@ -66,6 +66,9 @@ const (
 	IssueSitemap        = "sitemap_hygiene"
 	IssueNoindex        = "noindex_in_search"
 	IssueSoft404        = "soft_404"
+	IssueJSOnlyContent  = "js_only_content"
+	IssueBotErrors      = "bot_errors"
+	IssueBotWaste       = "bot_waste"
 )
 
 // ModelIssues are the codes offered to the model.

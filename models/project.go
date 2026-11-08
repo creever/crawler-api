@@ -31,9 +31,21 @@ type Project struct {
 	Currency string `bson:"currency"  json:"currency"`
 	// TaskLimit caps the tasks waiting for work at once; the rest stay on the
 	// watchlist until there is room. Zero means the default.
-	TaskLimit int       `bson:"task_limit" json:"task_limit"`
-	CreatedAt time.Time `bson:"created_at"       json:"created_at"`
-	UpdatedAt time.Time `bson:"updated_at"               json:"updated_at"`
+	TaskLimit int `bson:"task_limit" json:"task_limit"`
+	// WeeklyDigest sends the owner a summary every Monday. Off by default.
+	WeeklyDigest bool `bson:"weekly_digest" json:"weekly_digest"`
+	// CDN holds a secret and is only read and written through /cdn.
+	CDN       ProjectCDN `bson:"cdn,omitempty" json:"-"`
+	CreatedAt time.Time  `bson:"created_at"       json:"created_at"`
+	UpdatedAt time.Time  `bson:"updated_at"               json:"updated_at"`
+}
+
+// ProjectCDN connects a project to the CDN in front of its site.
+type ProjectCDN struct {
+	Provider string `bson:"provider,omitempty"` // "bunny" or empty
+	APIKey   string `bson:"api_key,omitempty"`
+	// PullZoneID is needed only to purge the whole zone.
+	PullZoneID int64 `bson:"pull_zone_id,omitempty"`
 }
 
 // ProjectUpdateInput contains the fields that can be updated on a Project
@@ -52,6 +64,7 @@ type ProjectUpdateInput struct {
 	Language              *string   `bson:"language,omitempty"         json:"language"`
 	Currency              *string   `bson:"currency,omitempty"         json:"currency"`
 	TaskLimit             *int      `bson:"task_limit,omitempty"       json:"task_limit"`
+	WeeklyDigest          *bool     `bson:"weekly_digest,omitempty"    json:"weekly_digest"`
 	UpdatedAt             time.Time `bson:"updated_at"              json:"-"`
 }
 

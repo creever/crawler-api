@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/hibiken/asynq"
@@ -12,6 +14,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.uber.org/zap"
+	"golang.org/x/net/html"
 	"golang.org/x/sync/singleflight"
 
 	"github.com/creever/crawler-api/models"
@@ -83,31 +86,110 @@ func (p *Processor) RenderToCache(ctx context.Context, project *models.Project, 
 }
 
 // renderAndStore renders a page the way the project serves bots and upserts
-// its cache entry.
+// its cache entry. A site the crawl found to need JavaScript is rendered with
+// it whatever the project says: without it the bot would get an empty shell.
 func (p *Processor) renderAndStore(ctx context.Context, project *models.Project, rawURL, source string) (*models.CacheEntry, error) {
-	page, err := p.fetchPage(ctx, rawURL, project.UseJS)
+	useJS := project.UseJS
+	if !useJS {
+		if audit, err := LatestAudit(ctx, p.db, project.ID); err == nil && audit != nil && audit.Rendering != nil && audit.Rendering.NeedsJS {
+			useJS = true
+		}
+	}
+	page, err := p.fetchPage(ctx, rawURL, useJS)
 	if err != nil {
 		return nil, err
 	}
-	return p.storeRender(ctx, project.ID, rawURL, page, source, time.Now().UTC())
+	return p.storeRender(ctx, project.ID, rawURL, page, useJS, source, time.Now().UTC())
+}
+
+// botHTML is the HTML to keep for bots: a JavaScript render no longer needs
+// its scripts, and a bot that runs them would only redo the work.
+func botHTML(page *renderedPage, rendered bool) string {
+	if rendered {
+		return stripScripts(page.HTML)
+	}
+	return page.HTML
+}
+
+// stripScripts removes executable scripts and the hints that preload them.
+// Structured data (JSON-LD) stays: it is what bots read. The rest of the
+// markup is copied as it came.
+func stripScripts(src string) string {
+	z := html.NewTokenizer(strings.NewReader(src))
+	var b strings.Builder
+	b.Grow(len(src))
+	inScript := false
+	for {
+		tt := z.Next()
+		if tt == html.ErrorToken {
+			return b.String()
+		}
+		// TagName and TagAttr rewrite the buffer Raw points into.
+		raw := append([]byte(nil), z.Raw()...)
+		switch tt {
+		case html.StartTagToken, html.SelfClosingTagToken:
+			name, _ := z.TagName()
+			tag := string(name)
+			attrs := tagAttrs(z)
+			if tag == "script" && !isDataScript(attrs["type"]) {
+				inScript = tt == html.StartTagToken
+				continue
+			}
+			if tag == "link" && preloadsScript(attrs) {
+				continue
+			}
+		case html.EndTagToken:
+			if name, _ := z.TagName(); inScript && string(name) == "script" {
+				inScript = false
+				continue
+			}
+		}
+		if !inScript {
+			b.Write(raw)
+		}
+	}
+}
+
+// tagAttrs reads the current tag's attributes, names in lower case. z.Raw must
+// be taken before this call.
+func tagAttrs(z *html.Tokenizer) map[string]string {
+	attrs := map[string]string{}
+	for {
+		key, val, more := z.TagAttr()
+		if len(key) > 0 {
+			attrs[strings.ToLower(string(key))] = string(val)
+		}
+		if !more {
+			return attrs
+		}
+	}
+}
+
+// isDataScript reports whether a script type is data rather than code.
+func isDataScript(typ string) bool {
+	return strings.EqualFold(strings.TrimSpace(typ), "application/ld+json")
+}
+
+func preloadsScript(attrs map[string]string) bool {
+	rel := strings.ToLower(attrs["rel"])
+	return rel == "modulepreload" || (rel == "preload" && strings.EqualFold(attrs["as"], "script"))
+}
+
+// cacheFields are what a render writes to its cache entry.
+func cacheFields(page *renderedPage, htmlBody, rawURL, source string, now time.Time) bson.M {
+	return bson.M{
+		"url": rawURL, "full_html": htmlBody, "status_code": page.Status, "final_url": page.FinalURL,
+		"redirects": page.Redirects, "render_ms": page.RenderMs, "html_bytes": len(htmlBody), "source": source,
+		"cached_at": now, "expires_at": now.Add(cacheFreshFor), "purge_at": now.Add(cacheKeepFor),
+	}
 }
 
 // storeRender upserts the render of a page into the cache.
-func (p *Processor) storeRender(ctx context.Context, projectID bson.ObjectID, rawURL string, page *renderedPage, source string, now time.Time) (*models.CacheEntry, error) {
-	entry := &models.CacheEntry{
-		ProjectID: projectID, Key: CacheKey(rawURL), URL: rawURL, FullHTML: page.HTML,
-		StatusCode: page.Status, FinalURL: page.FinalURL, Redirects: page.Redirects, RenderMs: page.RenderMs,
-		HTMLBytes: len(page.HTML), Source: source, CachedAt: now,
-		ExpiresAt: now.Add(cacheFreshFor), PurgeAt: now.Add(cacheKeepFor),
-	}
-	set := bson.M{
-		"url": entry.URL, "full_html": entry.FullHTML, "status_code": entry.StatusCode, "final_url": entry.FinalURL,
-		"redirects": entry.Redirects, "render_ms": entry.RenderMs, "html_bytes": entry.HTMLBytes, "source": source,
-		"cached_at": now, "expires_at": entry.ExpiresAt, "purge_at": entry.PurgeAt,
-	}
+func (p *Processor) storeRender(ctx context.Context, projectID bson.ObjectID, rawURL string, page *renderedPage, rendered bool, source string, now time.Time) (*models.CacheEntry, error) {
+	entry := &models.CacheEntry{}
 	err := p.db.Collection("cache_entries").FindOneAndUpdate(ctx,
-		bson.M{"project_id": projectID, "key": entry.Key},
-		bson.M{"$set": set, "$setOnInsert": bson.M{"hits": 0}},
+		bson.M{"project_id": projectID, "key": CacheKey(rawURL)},
+		bson.M{"$set": cacheFields(page, botHTML(page, rendered), rawURL, source, now), "$setOnInsert": bson.M{"hits": 0}},
 		options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.After),
 	).Decode(entry)
 	if err != nil {
@@ -122,16 +204,105 @@ func (p *Processor) refreshCachedRender(ctx context.Context, projectID bson.Obje
 	if page.Status >= 500 || page.HTML == "" {
 		return
 	}
-	now := time.Now().UTC()
 	_, err := p.db.Collection("cache_entries").UpdateOne(ctx,
 		bson.M{"project_id": projectID, "key": CacheKey(rawURL)},
-		bson.M{"$set": bson.M{
-			"full_html": page.HTML, "status_code": page.Status, "final_url": page.FinalURL, "redirects": page.Redirects,
-			"render_ms": page.RenderMs, "html_bytes": len(page.HTML), "source": models.CacheSourceCrawl,
-			"cached_at": now, "expires_at": now.Add(cacheFreshFor), "purge_at": now.Add(cacheKeepFor),
-		}})
+		bson.M{"$set": cacheFields(page, botHTML(page, true), rawURL, models.CacheSourceCrawl, time.Now().UTC())})
 	if err != nil {
 		p.logger.Warn("prerender cache not refreshed from the crawl", zap.String("url", rawURL), zap.Error(err))
+	}
+}
+
+const (
+	// warmCachePages is how many of a project's strongest search pages are
+	// kept ready in the cache.
+	warmCachePages = 200
+	// prerenderInUseWindow: a project with no bot request this recent has not
+	// connected /prerender, so there is nobody to warm the cache for.
+	prerenderInUseWindow = 30 * 24 * time.Hour
+)
+
+// warmSet names the pages the crawl should store in the cache as it reads
+// them: the strongest search pages, on projects that use /prerender.
+func (p *Processor) warmSet(ctx context.Context, project *models.Project, impressions map[string]float64, now time.Time) map[string]bool {
+	inUse, err := p.db.Collection("prerender_data").CountDocuments(ctx, bson.M{
+		"project_id": project.ID, "cached_at": bson.M{"$gte": now.Add(-prerenderInUseWindow)},
+		"requester_type": bson.M{"$ne": models.RequesterTypeHuman},
+	}, options.Count().SetLimit(1))
+	if err != nil || inUse == 0 {
+		return nil
+	}
+	return topImpressionKeys(impressions, warmCachePages)
+}
+
+// topImpressionKeys returns the n pages with the most impressions.
+func topImpressionKeys(impressions map[string]float64, n int) map[string]bool {
+	keys := make([]string, 0, len(impressions))
+	for k := range impressions {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if impressions[keys[i]] != impressions[keys[j]] {
+			return impressions[keys[i]] > impressions[keys[j]]
+		}
+		return keys[i] < keys[j]
+	})
+	if len(keys) > n {
+		keys = keys[:n]
+	}
+	out := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		out[k] = true
+	}
+	return out
+}
+
+// warmCache stores a JavaScript render the crawl made anyway. Server errors
+// and empty answers are not worth serving.
+func (p *Processor) warmCache(ctx context.Context, projectID bson.ObjectID, rawURL string, page *renderedPage) {
+	if page.Status >= 400 || page.HTML == "" {
+		return
+	}
+	if _, err := p.storeRender(ctx, projectID, rawURL, page, true, models.CacheSourceWarm, time.Now().UTC()); err != nil {
+		p.logger.Warn("prerender cache not warmed", zap.String("url", rawURL), zap.Error(err))
+	}
+}
+
+// taskRefreshRenders caps the renders one finished task can queue.
+const taskRefreshRenders = 50
+
+// refreshTaskPages makes bots get the changed pages of a finished task: the
+// cached pages turn stale at once, and the most served are rendered now.
+func (p *Processor) refreshTaskPages(ctx context.Context, task *models.SEOTask, now time.Time) {
+	if len(task.Pages) == 0 {
+		return
+	}
+	p.purgeProjectCDN(ctx, task.ProjectID, task.Pages, CDNTriggerTask)
+	keys := make(bson.A, 0, len(task.Pages))
+	for _, page := range task.Pages {
+		keys = append(keys, CacheKey(page))
+	}
+	col := p.db.Collection("cache_entries")
+	filter := bson.M{"project_id": task.ProjectID, "key": bson.M{"$in": keys}}
+	if _, err := col.UpdateMany(ctx, filter, bson.M{"$set": bson.M{"expires_at": now}}); err != nil {
+		p.logger.Warn("task pages not expired in the cache", zap.Error(err))
+		return
+	}
+	if p.asynqClient == nil {
+		return
+	}
+	cursor, err := col.Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "hits", Value: -1}}).SetLimit(taskRefreshRenders).SetProjection(bson.M{"url": 1}))
+	if err != nil {
+		p.logger.Warn("task pages not read from the cache", zap.Error(err))
+		return
+	}
+	var entries []models.CacheEntry
+	if err = cursor.All(ctx, &entries); err != nil {
+		return
+	}
+	for _, e := range entries {
+		if err = EnqueueRender(ctx, p.db, p.asynqClient, task.ProjectID, e.URL, models.CacheSourceTask); err != nil {
+			p.logger.Warn("task page not queued for a render", zap.String("url", e.URL), zap.Error(err))
+		}
 	}
 }
 
@@ -189,5 +360,8 @@ func (p *Processor) HandleCrawlRender(ctx context.Context, t *asynq.Task) error 
 		return err
 	}
 	p.setQueueStatus(ctx, payload.QueueEntryID, models.QueueStatusDone, "")
+	if source == models.CacheSourceManual {
+		p.purgeProjectCDN(ctx, projectOID, []string{payload.URL}, CDNTriggerManual)
+	}
 	return nil
 }

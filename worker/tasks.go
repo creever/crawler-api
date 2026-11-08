@@ -10,14 +10,16 @@ import (
 
 // Task type identifiers used as asynq task type names.
 const (
-	TypeCrawlRender   = "crawl:render"
-	TypeBlogGenerate  = "blog:generate"
-	TypeGSCSync       = "gsc:sync"
-	TypeComputeOpps   = "opportunities:compute"
-	TypeGenSuggest    = "suggestions:generate"
-	TypeVerifyTask    = "tasks:verify"
-	TypeMeasureTasks  = "tasks:measure"
-	TypeSiteCrawl     = "site:crawl"
+	TypeCrawlRender  = "crawl:render"
+	TypeBlogGenerate = "blog:generate"
+	TypeGSCSync      = "gsc:sync"
+	TypeComputeOpps  = "opportunities:compute"
+	TypeGenSuggest   = "suggestions:generate"
+	TypeVerifyTask   = "tasks:verify"
+	TypeMeasureTasks = "tasks:measure"
+	TypeSiteCrawl    = "site:crawl"
+	TypeSiteVitals   = "site:vitals"
+	TypeDigestSend   = "digest:send"
 )
 
 // queueCritical is the asynq queue of cache refreshes.

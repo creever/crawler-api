@@ -889,6 +889,7 @@ func (p *Processor) HandleTaskVerify(ctx context.Context, t *asynq.Task) error {
 		return nil
 	}
 	now := time.Now().UTC()
+	p.refreshTaskPages(ctx, &task, now)
 	if len(task.Checks) == 0 {
 		v := models.TaskVerification{At: now, Note: "This task cannot be checked from outside. Confirm it once you have seen the result."}
 		_, err = col.UpdateOne(ctx, bson.M{"_id": id}, bson.M{"$set": bson.M{"verification": v, "updated_at": now}})

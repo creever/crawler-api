@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -33,6 +34,19 @@ func (h *SettingsHandler) col() *mongo.Collection {
 // @Produce      json
 // @Success      200  {array}   models.Setting
 // @Router       /api/v1/settings [get]
+// settingMask stands in for a stored secret.
+const settingMask = "********"
+
+// maskSecret hides the values of API keys and passwords: they can be replaced
+// through the API, never read back.
+func maskSecret(key, value string) string {
+	lower := strings.ToLower(key)
+	if value != "" && (strings.Contains(lower, "password") || strings.Contains(lower, "api_key") || strings.Contains(lower, "secret") || strings.Contains(lower, "token")) {
+		return settingMask
+	}
+	return value
+}
+
 func (h *SettingsHandler) List(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -51,6 +65,9 @@ func (h *SettingsHandler) List(c *gin.Context) {
 	}
 	if settings == nil {
 		settings = []models.Setting{}
+	}
+	for i := range settings {
+		settings[i].Value = maskSecret(settings[i].Key, settings[i].Value)
 	}
 	c.JSON(http.StatusOK, settings)
 }

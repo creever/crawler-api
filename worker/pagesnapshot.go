@@ -1079,12 +1079,20 @@ func (p *Processor) getSnapshot(ctx context.Context, projectOID bson.ObjectID, p
 // readPage renders a page now, ignoring the cache, and stores its snapshot and
 // profile.
 func (p *Processor) readPage(ctx context.Context, projectOID bson.ObjectID, pageURL string, useJS bool, pacer *renderPacer) (*models.PageSnapshot, error) {
+	return p.readPageThen(ctx, projectOID, pageURL, useJS, pacer, nil)
+}
+
+// readPageThen is readPage with a callback that gets the render.
+func (p *Processor) readPageThen(ctx context.Context, projectOID bson.ObjectID, pageURL string, useJS bool, pacer *renderPacer, onRender func(*renderedPage)) (*models.PageSnapshot, error) {
 	if err := pacer.wait(ctx); err != nil {
 		return nil, err
 	}
 	page, err := p.fetchPage(ctx, pageURL, useJS)
 	if err != nil {
 		return nil, err
+	}
+	if onRender != nil {
+		onRender(page)
 	}
 	snap, err := extractSnapshot(pageURL, page.Status, page.HTML)
 	if err != nil {

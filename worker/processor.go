@@ -49,6 +49,8 @@ func (p *Processor) Register(mux *asynq.ServeMux) {
 	mux.HandleFunc(TypeVerifyTask, p.HandleTaskVerify)
 	mux.HandleFunc(TypeMeasureTasks, p.HandleTasksMeasure)
 	mux.HandleFunc(TypeSiteCrawl, p.HandleSiteCrawl)
+	mux.HandleFunc(TypeSiteVitals, p.HandleSiteVitals)
+	mux.HandleFunc(TypeDigestSend, p.HandleDigestSend)
 	mux.HandleFunc("ga4:sync", p.HandleGA4Sync)
 }
 

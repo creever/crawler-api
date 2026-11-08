@@ -592,14 +592,20 @@ func (h *PrerenderHandler) CacheDelete(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid cache entry id"})
 		return
 	}
-	res, err := h.db.Collection("cache_entries").DeleteOne(ctx, bson.M{"_id": cid, "project_id": id})
+	var entry models.CacheEntry
+	err = h.db.Collection("cache_entries").FindOneAndDelete(ctx, bson.M{"_id": cid, "project_id": id},
+		options.FindOneAndDelete().SetProjection(bson.M{"url": 1})).Decode(&entry)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "cache entry not found"})
+		return
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete cache entry"})
 		return
 	}
-	if res.DeletedCount == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "cache entry not found"})
-		return
+	var project models.Project
+	if h.db.Collection("projects").FindOne(ctx, bson.M{"_id": id}).Decode(&project) == nil {
+		_, _ = worker.PurgeCDN(ctx, h.db, &project, []string{entry.URL}, worker.CDNTriggerManual)
 	}
 	c.Status(http.StatusNoContent)
 }

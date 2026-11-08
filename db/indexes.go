@@ -193,6 +193,32 @@ func EnsureIndexes(database *mongo.Database, logger *zap.Logger) {
 		Options: options.Index().SetExpireAfterSeconds(30 * 24 * 3600).SetName("crawl_queue_ttl"),
 	})
 
+	// page_vitals: runs of a project, kept 180 days
+	create("page_vitals", mongo.IndexModel{
+		Keys:    bson.D{{Key: "project_id", Value: 1}, {Key: "run_at", Value: -1}},
+		Options: options.Index().SetName("page_vitals_project_run"),
+	})
+	create("page_vitals", mongo.IndexModel{
+		Keys:    bson.D{{Key: "run_at", Value: 1}},
+		Options: options.Index().SetExpireAfterSeconds(180 * 24 * 3600).SetName("page_vitals_ttl"),
+	})
+
+	// cdn_purges: a project's recent purges, kept 30 days
+	create("cdn_purges", mongo.IndexModel{
+		Keys:    bson.D{{Key: "project_id", Value: 1}, {Key: "at", Value: -1}},
+		Options: options.Index().SetName("cdn_purges_project_time"),
+	})
+	create("cdn_purges", mongo.IndexModel{
+		Keys:    bson.D{{Key: "at", Value: 1}},
+		Options: options.Index().SetExpireAfterSeconds(30 * 24 * 3600).SetName("cdn_purges_ttl"),
+	})
+
+	// digest_log: when a project's summary went out
+	create("digest_log", mongo.IndexModel{
+		Keys:    bson.D{{Key: "project_id", Value: 1}, {Key: "sent_at", Value: -1}},
+		Options: options.Index().SetName("digest_log_project_time"),
+	})
+
 	// opportunities: one row per finding, kept across recomputations
 	create("opportunities", mongo.IndexModel{
 		Keys: bson.D{

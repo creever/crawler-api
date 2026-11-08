@@ -85,9 +85,11 @@ type SiteAudit struct {
 	SearchCoverage float64 `bson:"search_coverage"    json:"search_coverage"`
 	// NotFound is how the site answered a URL that cannot exist. A site should
 	// say 404 or 410; a 200, or a redirect to another page, is a soft 404.
-	NotFound         *NotFoundProbe   `bson:"not_found,omitempty" json:"not_found,omitempty"`
+	NotFound *NotFoundProbe `bson:"not_found,omitempty" json:"not_found,omitempty"`
 	// Rendering compares a few pages read with and without JavaScript.
-	Rendering        *RenderingProbe  `bson:"rendering,omitempty" json:"rendering,omitempty"`
+	Rendering *RenderingProbe `bson:"rendering,omitempty" json:"rendering,omitempty"`
+	// AIAccess says which AI crawlers robots.txt lets in.
+	AIAccess         []AIAccess       `bson:"ai_access,omitempty" json:"ai_access,omitempty"`
 	IssuesBySeverity map[string]int   `bson:"issues_by_severity" json:"issues_by_severity"` // pages per severity
 	IssuesByCode     map[string]int   `bson:"issues_by_code"     json:"issues_by_code"`     // pages per issue
 	Groups           []SiteAuditGroup `bson:"groups"             json:"groups"`
@@ -97,15 +99,33 @@ type SiteAudit struct {
 // rendered page. Crawlers of AI assistants and many other bots run no
 // JavaScript: content that needs it reaches them only through prerendering.
 type RenderingProbe struct {
-	Pages     []string `bson:"pages"      json:"pages"`
-	HTMLWords int      `bson:"html_words" json:"html_words"`
-	JSWords   int      `bson:"js_words"   json:"js_words"`
-	HTMLLinks int      `bson:"html_links" json:"html_links"`
-	JSLinks   int      `bson:"js_links"   json:"js_links"`
+	Pages []string `bson:"pages"      json:"pages"`
+	// Samples is the comparison page by page.
+	Samples   []RenderingSample `bson:"samples,omitempty" json:"samples,omitempty"`
+	HTMLWords int               `bson:"html_words" json:"html_words"`
+	JSWords   int               `bson:"js_words"   json:"js_words"`
+	HTMLLinks int               `bson:"html_links" json:"html_links"`
+	JSLinks   int               `bson:"js_links"   json:"js_links"`
 	// NeedsJS is set when the plain HTML carries clearly less text or links.
 	NeedsJS bool `bson:"needs_js" json:"needs_js"`
 	// Mode is how this crawl read the site: "js" or "html".
 	Mode string `bson:"mode" json:"mode"`
+}
+
+// RenderingSample is one page read with and without JavaScript.
+type RenderingSample struct {
+	URL       string `bson:"url"        json:"url"`
+	Title     string `bson:"title"      json:"title"`
+	HTMLWords int    `bson:"html_words" json:"html_words"`
+	JSWords   int    `bson:"js_words"   json:"js_words"`
+	HTMLLinks int    `bson:"html_links" json:"html_links"`
+	JSLinks   int    `bson:"js_links"   json:"js_links"`
+}
+
+// AIAccess is whether robots.txt lets an AI crawler at the site.
+type AIAccess struct {
+	Agent   string `bson:"agent"   json:"agent"`
+	Allowed bool   `bson:"allowed" json:"allowed"`
 }
 
 // NotFoundProbe is the answer to a URL that cannot exist on the site.
