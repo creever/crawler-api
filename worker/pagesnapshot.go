@@ -1090,6 +1090,11 @@ func (p *Processor) readPage(ctx context.Context, projectOID bson.ObjectID, page
 	if err != nil {
 		return nil, err
 	}
+	// A JavaScript render is what bots get from /prerender: a page they ask
+	// for is refreshed in the cache at no extra cost.
+	if useJS {
+		p.refreshCachedRender(ctx, projectOID, pageURL, page)
+	}
 	snap.FinalURL, snap.Redirects, snap.XRobotsTag, snap.RenderMs = page.FinalURL, page.Redirects, page.XRobotsTag, page.RenderMs
 	now := time.Now().UTC()
 	snap.ProjectID = projectOID

@@ -15,51 +15,38 @@ const (
 	RequesterTypeAI    RequesterType = "ai"
 )
 
-// PrerenderData holds information about a prerendered (JavaScript-rendered) URL
+// How a prerender request was answered.
+const (
+	CacheStateHit   = "hit"   // a fresh render from the cache
+	CacheStateStale = "stale" // an old render, refreshed in the background
+	CacheStateMiss  = "miss"  // rendered while the caller waited
+	CacheStateError = "error" // no render could be made
+)
+
+// PrerenderData is one request to /prerender.
+// MongoDB collection: prerender_data (kept for 90 days)
 type PrerenderData struct {
-	ID            bson.ObjectID `bson:"_id,omitempty"    json:"id,omitempty"`
-	ProjectID     bson.ObjectID `bson:"project_id"       json:"project_id"       binding:"required"`
-	URL           string        `bson:"url"              json:"url"              binding:"required"`
-	StatusCode    int           `bson:"status_code"      json:"status_code"`
-	RenderedHTML  string        `bson:"rendered_html"    json:"rendered_html"`
+	ID         bson.ObjectID `bson:"_id,omitempty"    json:"id,omitempty"`
+	ProjectID  bson.ObjectID `bson:"project_id"       json:"project_id"`
+	URL        string        `bson:"url"              json:"url"`
+	// Key is the normalized URL: the spellings of a page count as one.
+	Key        string        `bson:"key"              json:"key"`
+	StatusCode int           `bson:"status_code"      json:"status_code"`
+	// RenderTimeMs is how long the caller waited for the answer.
 	RenderTimeMs  int64         `bson:"render_time_ms"   json:"render_time_ms"`
 	FromCache     bool          `bson:"from_cache"       json:"from_cache"`
+	Cache         string        `bson:"cache"            json:"cache"`
 	UserAgent     string        `bson:"user_agent"       json:"user_agent"`
 	RequesterType RequesterType `bson:"requester_type"   json:"requester_type"`
-	CachedAt      time.Time     `bson:"cached_at"        json:"cached_at"`
-	ExpiresAt     time.Time     `bson:"expires_at"       json:"expires_at"`
+	// Agent names the crawler, e.g. Googlebot or GPTBot; empty for others.
+	Agent    string    `bson:"agent"     json:"agent"`
+	CachedAt time.Time `bson:"cached_at" json:"cached_at"` // when the request came
 }
 
-// PrerenderSummary is a lightweight summary used by the dashboard
-type PrerenderSummary struct {
-	TotalRequests int64   `json:"total_requests"`
-	CacheHits     int64   `json:"cache_hits"`
-	CacheMisses   int64   `json:"cache_misses"`
-	HitRate       float64 `json:"hit_rate_percent"`
-	AvgRenderMs   float64 `json:"avg_render_time_ms"`
-}
-
-// PrerenderListResponse is the paginated list response for the UI log view.
+// PrerenderListResponse is a page of the request log.
 type PrerenderListResponse struct {
 	Total  int64           `json:"total"`
 	Limit  int64           `json:"limit"`
 	Offset int64           `json:"offset"`
 	Data   []PrerenderData `json:"data"`
-}
-
-// PrerenderRequesterBreakdown holds per-type counts for the stats endpoint.
-type PrerenderRequesterBreakdown struct {
-	Human int64 `json:"human"`
-	Bot   int64 `json:"bot"`
-	AI    int64 `json:"ai"`
-}
-
-// PrerenderStats is a detailed aggregate returned by the stats endpoint.
-type PrerenderStats struct {
-	TotalRequests int64                       `json:"total_requests"`
-	CacheHits     int64                       `json:"cache_hits"`
-	CacheMisses   int64                       `json:"cache_misses"`
-	HitRate       float64                     `json:"hit_rate_percent"`
-	AvgRenderMs   float64                     `json:"avg_render_time_ms"`
-	ByRequester   PrerenderRequesterBreakdown `json:"by_requester"`
 }

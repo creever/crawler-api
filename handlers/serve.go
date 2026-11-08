@@ -19,367 +19,108 @@ import (
 )
 
 const (
-	// prerenderTimeout is the maximum time to wait for a render task to complete.
-	prerenderTimeout = 120 * time.Second
-	// prerenderPollInterval is how often we check the queue entry status.
-	prerenderPollInterval = 500 * time.Millisecond
-	// prerenderPriority is the default priority assigned to prerender queue entries.
-	prerenderPriority = 10
+	// prerenderTimeout caps how long a bot waits for a page that is not cached.
+	prerenderTimeout = 60 * time.Second
 )
 
-// errPrerenderTimeout is returned when the render task does not finish within prerenderTimeout.
-var errPrerenderTimeout = errors.New("prerender timed out waiting for render task to complete")
-
-// ServeHandler provides the synchronous prerender endpoint used as an nginx
-// proxy backend.  Incoming requests are answered with the fully-rendered HTML
-// of the requested URL, either served from the cache or freshly rendered on
-// demand via the existing queue + crawler pipeline.
+// ServeHandler answers /prerender: the rendered HTML of a page for a bot.
 type ServeHandler struct {
 	db          *mongo.Database
 	asynqClient *asynq.Client
+	renderer    *worker.Processor
 }
 
-// NewServeHandler creates a new ServeHandler.
-func NewServeHandler(db *mongo.Database, asynqClient *asynq.Client) *ServeHandler {
-	return &ServeHandler{db: db, asynqClient: asynqClient}
+// NewServeHandler creates a ServeHandler.
+func NewServeHandler(db *mongo.Database, asynqClient *asynq.Client, renderer *worker.Processor) *ServeHandler {
+	return &ServeHandler{db: db, asynqClient: asynqClient, renderer: renderer}
 }
 
 // Serve godoc
-// @Summary      Synchronous prerender endpoint for nginx proxy
-// @Description  Returns the fully-rendered HTML for the given URL.
-//
-//	The response is served from cache when a valid (non-expired) entry
-//	exists.  Otherwise a crawl:render task (and a crawl:seo task for
-//	analytics) is queued via the standard pipeline and the handler
-//	blocks until the render completes or times out (~120 s).
-//
+// @Summary      Prerendered HTML of a page, for bots
+// @Description  A fresh render comes from the cache. An old one is served at once and refreshed in the background. A page not in the cache is rendered while the caller waits. X-Prerender-Status carries the page's own HTTP status; X-Prerender-Cache says hit, stale or miss.
 // @Tags         prerender
 // @Produce      html
-// @Param        url  query  string  true  "Fully-qualified URL to prerender"
-// @Success      200  {string}  string  "Rendered HTML"
-// @Failure      400  {object}  map[string]string
-// @Failure      404  {object}  map[string]string
-// @Failure      500  {object}  map[string]string
-// @Failure      504  {object}  map[string]string
+// @Param        url  query  string  true  "Fully-qualified page URL"
 // @Router       /prerender [get]
 func (h *ServeHandler) Serve(c *gin.Context) {
 	start := time.Now()
 	userAgent := c.GetHeader("User-Agent")
-
 	rawURL := c.Query("url")
-	if rawURL == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "url query parameter is required"})
-		return
-	}
-
 	parsedURL, err := url.Parse(rawURL)
-	if err != nil || parsedURL.Host == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid url: must be a fully-qualified URL"})
+	if rawURL == "" || err != nil || parsedURL.Host == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "url must be a fully-qualified URL"})
 		return
 	}
-
-	// Use a context with a hard deadline that covers the entire render cycle.
 	ctx, cancel := context.WithTimeout(c.Request.Context(), prerenderTimeout)
 	defer cancel()
 
-	// 1. Find the project that owns this URL.
 	project, err := h.findProjectByHost(ctx, parsedURL.Host)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "no active project found matching host: " + parsedURL.Host})
 		return
 	}
 
-	// 2. Return immediately if a valid cache entry already exists.
-	if cached, cacheErr := h.lookupCache(ctx, rawURL); cacheErr == nil {
-		pageStatus := cachePageStatus(cached)
-		c.Header("X-Prerender-Status", strconv.Itoa(pageStatus))
-		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(cached.FullHTML))
-		go h.logPrerenderRequest(project.ID, rawURL, userAgent, true, pageStatus, time.Since(start))
+	state := models.CacheStateHit
+	entry, err := worker.LookupCache(ctx, h.db, project.ID, rawURL)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "cache lookup failed"})
 		return
 	}
-
-	// 3. Check whether a render is already in flight for this URL to avoid
-	//    queueing duplicate tasks.
-	existingID, found := h.findInFlightRender(ctx, project.ID, rawURL)
-	if found {
-		entry, waitErr := h.waitForRender(ctx, existingID, rawURL)
-		if waitErr != nil {
-			h.respondRenderError(c, waitErr)
-			go h.logPrerenderRequest(project.ID, rawURL, userAgent, false, renderErrorStatus(waitErr), time.Since(start))
+	switch {
+	case entry != nil && time.Now().After(entry.ExpiresAt):
+		state = models.CacheStateStale
+		go h.refresh(project.ID, rawURL)
+	case entry == nil:
+		state = models.CacheStateMiss
+		entry, err = h.renderer.RenderToCache(ctx, project, rawURL, models.CacheSourceBot)
+		if err != nil {
+			status := http.StatusBadGateway
+			if errors.Is(err, context.DeadlineExceeded) {
+				status = http.StatusGatewayTimeout
+			}
+			c.JSON(status, gin.H{"error": "render failed: " + err.Error()})
+			go h.logRequest(project.ID, rawURL, userAgent, models.CacheStateError, status, time.Since(start))
 			return
 		}
-		pageStatus := cachePageStatus(entry)
-		c.Header("X-Prerender-Status", strconv.Itoa(pageStatus))
-		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(entry.FullHTML))
-		go h.logPrerenderRequest(project.ID, rawURL, userAgent, false, pageStatus, time.Since(start))
-		return
 	}
-
-	// 4. Enqueue a fresh render task (and a background SEO task for analytics).
-	renderEntryID, enqErr := h.enqueueRender(ctx, project, rawURL)
-	if enqErr != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to enqueue render task: " + enqErr.Error()})
-		return
+	if state != models.CacheStateMiss {
+		go worker.MarkServed(context.Background(), h.db, entry.ID, time.Now().UTC())
 	}
-
-	// SEO analytics disabled temporarily — prerender returns HTML as fast as possible.
-	// h.enqueueSEO(ctx, project, rawURL)
-
-	// 5. Wait for the render task to finish, then return the HTML.
-	entry, waitErr := h.waitForRender(ctx, renderEntryID, rawURL)
-	if waitErr != nil {
-		h.respondRenderError(c, waitErr)
-		go h.logPrerenderRequest(project.ID, rawURL, userAgent, false, renderErrorStatus(waitErr), time.Since(start))
-		return
+	pageStatus := entry.StatusCode
+	if pageStatus == 0 {
+		pageStatus = http.StatusOK
 	}
-	pageStatus := cachePageStatus(entry)
 	c.Header("X-Prerender-Status", strconv.Itoa(pageStatus))
+	c.Header("X-Prerender-Cache", state)
 	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(entry.FullHTML))
-	go h.logPrerenderRequest(project.ID, rawURL, userAgent, false, pageStatus, time.Since(start))
+	go h.logRequest(project.ID, rawURL, userAgent, state, pageStatus, time.Since(start))
 }
 
-// ---------------------------------------------------------------------------
-// Project lookup
-// ---------------------------------------------------------------------------
+// refresh queues a new render of a stale page.
+func (h *ServeHandler) refresh(projectID bson.ObjectID, rawURL string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = worker.EnqueueRender(ctx, h.db, h.asynqClient, projectID, rawURL, models.CacheSourceStale)
+}
 
-// findProjectByHost returns the first active project whose base URL hostname
-// matches host.
+// findProjectByHost returns the active project of a host; www. is ignored.
 func (h *ServeHandler) findProjectByHost(ctx context.Context, host string) (*models.Project, error) {
 	cursor, err := h.db.Collection("projects").Find(ctx, bson.M{"active": true})
 	if err != nil {
 		return nil, err
 	}
-	defer cursor.Close(ctx) //nolint:errcheck
-
 	var projects []models.Project
 	if err = cursor.All(ctx, &projects); err != nil {
 		return nil, err
 	}
-
+	want := strings.TrimPrefix(strings.ToLower(host), "www.")
 	for i := range projects {
-		p := &projects[i]
-		pURL, parseErr := url.Parse(p.URL)
-		if parseErr != nil {
-			continue
-		}
-		if pURL.Host == host {
-			return p, nil
+		if pURL, parseErr := url.Parse(projects[i].URL); parseErr == nil &&
+			strings.TrimPrefix(strings.ToLower(pURL.Host), "www.") == want {
+			return &projects[i], nil
 		}
 	}
 	return nil, errors.New("no matching project")
-}
-
-// ---------------------------------------------------------------------------
-// Cache helpers
-// ---------------------------------------------------------------------------
-
-// lookupCache returns a non-expired cache entry for rawURL, or an error if
-// none is found.
-func (h *ServeHandler) lookupCache(ctx context.Context, rawURL string) (*models.CacheEntry, error) {
-	var entry models.CacheEntry
-	err := h.db.Collection("cache_entries").FindOne(ctx, bson.M{
-		"url":        rawURL,
-		"expires_at": bson.M{"$gt": time.Now().UTC()},
-	}).Decode(&entry)
-	if err != nil {
-		return nil, err
-	}
-	return &entry, nil
-}
-
-// ---------------------------------------------------------------------------
-// In-flight detection
-// ---------------------------------------------------------------------------
-
-// findInFlightRender looks for an existing pending or processing render queue
-// entry for the given URL within the project.  If found it returns the entry
-// ObjectID and true.
-func (h *ServeHandler) findInFlightRender(ctx context.Context, projectID bson.ObjectID, rawURL string) (bson.ObjectID, bool) {
-	var entry models.QueueEntry
-	err := h.db.Collection("crawl_queue").FindOne(ctx, bson.M{
-		"project_id": projectID,
-		"url":        rawURL,
-		"task_type":  models.QueueTaskTypeRender,
-		"status":     bson.M{"$in": []models.QueueStatus{models.QueueStatusPending, models.QueueStatusProcessing}},
-	}).Decode(&entry)
-	if err != nil {
-		return bson.ObjectID{}, false
-	}
-	return entry.ID, true
-}
-
-// ---------------------------------------------------------------------------
-// Task enqueueing
-// ---------------------------------------------------------------------------
-
-// enqueueRender creates a crawl:render queue entry and dispatches the asynq
-// task.  It returns the new entry's ObjectID so the caller can poll its status.
-//
-// The MongoDB entry is inserted before the asynq task is dispatched so that
-// concurrent callers hitting findInFlightRender can observe the pending entry
-// and avoid enqueueing a duplicate render job.
-func (h *ServeHandler) enqueueRender(ctx context.Context, project *models.Project, rawURL string) (bson.ObjectID, error) {
-	config := models.ProjectConfig{
-		ProjectID: project.ID.Hex(),
-		SeedURLs:  []string{rawURL},
-		UseJS:     project.UseJS,
-		MaxPages:  project.MaxPages,
-	}
-
-	entry := models.QueueEntry{
-		ID:         bson.NewObjectID(),
-		ProjectID:  project.ID,
-		URL:        rawURL,
-		TaskType:   models.QueueTaskTypeRender,
-		Priority:   prerenderPriority,
-		Status:     models.QueueStatusPending,
-		EnqueuedAt: time.Now().UTC(),
-	}
-
-	// Insert the queue entry first so findInFlightRender sees it immediately,
-	// preventing a concurrent request from enqueuing a duplicate render task.
-	if _, err := h.db.Collection("crawl_queue").InsertOne(ctx, entry); err != nil {
-		return bson.ObjectID{}, err
-	}
-
-	task, err := worker.NewCrawlRenderTask(entry.ID.Hex(), config)
-	if err != nil {
-		h.markQueueFailed(ctx, entry.ID, err.Error())
-		return bson.ObjectID{}, err
-	}
-
-	info, err := h.asynqClient.EnqueueContext(ctx, task)
-	if err != nil {
-		h.markQueueFailed(ctx, entry.ID, err.Error())
-		return bson.ObjectID{}, err
-	}
-
-	// Persist the asynq task ID for observability; non-critical if it fails.
-	_, _ = h.db.Collection("crawl_queue").UpdateOne(ctx,
-		bson.M{"_id": entry.ID},
-		bson.M{"$set": bson.M{"asynq_task_id": info.ID}},
-	)
-	return entry.ID, nil
-}
-
-// markQueueFailed sets a queue entry to the failed state with the given message.
-func (h *ServeHandler) markQueueFailed(ctx context.Context, id bson.ObjectID, errMsg string) {
-	tctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_, _ = h.db.Collection("crawl_queue").UpdateOne(tctx,
-		bson.M{"_id": id},
-		bson.M{"$set": bson.M{"status": models.QueueStatusFailed, "error": errMsg}},
-	)
-}
-
-// enqueueSEO creates a crawl:seo queue entry for analytics tracking.
-// Errors are intentionally ignored (best-effort).
-func (h *ServeHandler) enqueueSEO(ctx context.Context, project *models.Project, rawURL string) error {
-	config := models.ProjectConfig{
-		ProjectID: project.ID.Hex(),
-		SeedURLs:  []string{rawURL},
-		UseJS:     project.UseJS,
-		MaxPages:  project.MaxPages,
-	}
-
-	entry := models.QueueEntry{
-		ID:         bson.NewObjectID(),
-		ProjectID:  project.ID,
-		URL:        rawURL,
-		TaskType:   models.QueueTaskTypeSEO,
-		Priority:   prerenderPriority,
-		Status:     models.QueueStatusPending,
-		EnqueuedAt: time.Now().UTC(),
-	}
-
-	task, err := worker.NewCrawlSEOTask(entry.ID.Hex(), config)
-	if err != nil {
-		return err
-	}
-
-	info, err := h.asynqClient.EnqueueContext(ctx, task)
-	if err != nil {
-		return err
-	}
-	entry.AsynqTaskID = info.ID
-
-	_, err = h.db.Collection("crawl_queue").InsertOne(ctx, entry)
-	return err
-}
-
-// ---------------------------------------------------------------------------
-// Polling
-// ---------------------------------------------------------------------------
-
-// waitForRender polls the queue entry until it reaches a terminal state (done
-// or failed) or the context deadline is exceeded.  On success it fetches and
-// returns the cache entry (including the page status code).
-func (h *ServeHandler) waitForRender(ctx context.Context, entryID bson.ObjectID, rawURL string) (*models.CacheEntry, error) {
-	ticker := time.NewTicker(prerenderPollInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, errPrerenderTimeout
-		case <-ticker.C:
-			var current models.QueueEntry
-			if err := h.db.Collection("crawl_queue").FindOne(ctx, bson.M{"_id": entryID}).Decode(&current); err != nil {
-				return nil, err
-			}
-
-			switch current.Status {
-			case models.QueueStatusDone:
-				var cacheEntry models.CacheEntry
-				if err := h.db.Collection("cache_entries").FindOne(ctx, bson.M{"url": rawURL}).Decode(&cacheEntry); err != nil {
-					return nil, errors.New("render complete but cache entry not found")
-				}
-				return &cacheEntry, nil
-
-			case models.QueueStatusFailed:
-				msg := current.Error
-				if msg == "" {
-					msg = "render task failed"
-				}
-				return nil, errors.New(msg)
-			}
-			// Still pending or processing — keep polling.
-		}
-	}
-}
-
-// cachePageStatus returns the HTTP status code stored in a cache entry,
-// defaulting to 200 when the field is unset (e.g. for entries created before
-// X-Prerender-Status support was added).
-func cachePageStatus(entry *models.CacheEntry) int {
-	if entry.StatusCode == 0 {
-		return http.StatusOK
-	}
-	return entry.StatusCode
-}
-
-// ---------------------------------------------------------------------------
-// Error helpers
-// ---------------------------------------------------------------------------
-
-func (h *ServeHandler) respondRenderError(c *gin.Context, err error) {
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errPrerenderTimeout) {
-		c.JSON(http.StatusGatewayTimeout, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-}
-
-// ---------------------------------------------------------------------------
-// Request logging
-// ---------------------------------------------------------------------------
-
-// renderErrorStatus maps a render error to the corresponding HTTP status code.
-func renderErrorStatus(err error) int {
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errPrerenderTimeout) {
-		return http.StatusGatewayTimeout
-	}
-	return http.StatusInternalServerError
 }
 
 // classifyRequester inspects the User-Agent header and returns the appropriate
@@ -391,7 +132,7 @@ func classifyRequester(ua string) models.RequesterType {
 	// Well-known AI crawlers / LLM-related user agents.
 	aiAgents := []string{
 		"gptbot", "chatgpt-user", "oai-searchbot",
-		"claudebot", "claude-web", "anthropic",
+		"claudebot", "claude-web", "anthropic", "claude-user", "claude-searchbot", "perplexity-user", "google-extended", "bytespider", "amazonbot",
 		"ccbot",
 		"perplexitybot",
 		"googleother",
@@ -428,30 +169,40 @@ func classifyRequester(ua string) models.RequesterType {
 	return models.RequesterTypeHuman
 }
 
-// logPrerenderRequest inserts a PrerenderData record into prerender_data.
-// It is intended to be called as a goroutine so it does not block the response.
-func (h *ServeHandler) logPrerenderRequest(
-	projectID bson.ObjectID,
-	rawURL string,
-	userAgent string,
-	fromCache bool,
-	statusCode int,
-	elapsed time.Duration,
-) {
-	record := models.PrerenderData{
-		ID:            bson.NewObjectID(),
-		ProjectID:     projectID,
-		URL:           rawURL,
-		StatusCode:    statusCode,
-		RenderTimeMs:  elapsed.Milliseconds(),
-		FromCache:     fromCache,
-		UserAgent:     userAgent,
-		RequesterType: classifyRequester(userAgent),
-		CachedAt:      time.Now().UTC(),
-	}
+// knownAgents names well-known crawlers by a User-Agent fragment, most
+// specific first.
+var knownAgents = []struct{ match, name string }{
+	{"chatgpt-user", "ChatGPT-User"}, {"oai-searchbot", "OAI-SearchBot"}, {"gptbot", "GPTBot"},
+	{"claude-user", "Claude-User"}, {"claude-searchbot", "Claude-SearchBot"}, {"claudebot", "ClaudeBot"},
+	{"perplexity-user", "Perplexity-User"}, {"perplexitybot", "PerplexityBot"},
+	{"google-extended", "Google-Extended"}, {"googleother", "GoogleOther"}, {"google-inspectiontool", "Google-InspectionTool"},
+	{"googlebot", "Googlebot"}, {"adsbot-google", "AdsBot-Google"}, {"bingbot", "Bingbot"},
+	{"applebot", "Applebot"}, {"yandex", "YandexBot"}, {"duckduckbot", "DuckDuckBot"}, {"ccbot", "CCBot"},
+	{"meta-externalagent", "Meta-ExternalAgent"}, {"facebookexternalhit", "Facebook"}, {"bytespider", "Bytespider"},
+	{"amazonbot", "Amazonbot"}, {"ahrefsbot", "AhrefsBot"}, {"semrushbot", "SemrushBot"}, {"twitterbot", "Twitterbot"},
+	{"linkedinbot", "LinkedInBot"}, {"slackbot", "Slackbot"},
+}
 
+// agentName returns the crawler a User-Agent belongs to, or "".
+func agentName(ua string) string {
+	lower := strings.ToLower(ua)
+	for _, a := range knownAgents {
+		if strings.Contains(lower, a.match) {
+			return a.name
+		}
+	}
+	return ""
+}
+
+// logRequest records a /prerender request. It runs in its own goroutine.
+func (h *ServeHandler) logRequest(projectID bson.ObjectID, rawURL, userAgent, cache string, statusCode int, elapsed time.Duration) {
+	record := models.PrerenderData{
+		ID: bson.NewObjectID(), ProjectID: projectID, URL: rawURL, Key: worker.CacheKey(rawURL), StatusCode: statusCode,
+		RenderTimeMs: elapsed.Milliseconds(), FromCache: cache == models.CacheStateHit || cache == models.CacheStateStale,
+		Cache: cache, UserAgent: userAgent, RequesterType: classifyRequester(userAgent), Agent: agentName(userAgent),
+		CachedAt: time.Now().UTC(),
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-
 	_, _ = h.db.Collection("prerender_data").InsertOne(ctx, record)
 }

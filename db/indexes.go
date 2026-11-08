@@ -158,6 +158,41 @@ func EnsureIndexes(database *mongo.Database, logger *zap.Logger) {
 		Options: options.Index().SetName("opportunities_project_type"),
 	})
 
+	// cache_entries: one render per page; lookups by /prerender
+	create("cache_entries", mongo.IndexModel{
+		Keys:    bson.D{{Key: "project_id", Value: 1}, {Key: "key", Value: 1}},
+		Options: options.Index().SetUnique(true).SetName("cache_entries_project_key"),
+	})
+	create("cache_entries", mongo.IndexModel{
+		Keys:    bson.D{{Key: "project_id", Value: 1}, {Key: "hits", Value: -1}},
+		Options: options.Index().SetName("cache_entries_project_hits"),
+	})
+	// cache_entries: a render not refreshed for 30 days is removed
+	create("cache_entries", mongo.IndexModel{
+		Keys:    bson.D{{Key: "purge_at", Value: 1}},
+		Options: options.Index().SetExpireAfterSeconds(0).SetName("cache_entries_purge_ttl"),
+	})
+
+	// prerender_data: the request log of a project over time, kept 90 days
+	create("prerender_data", mongo.IndexModel{
+		Keys:    bson.D{{Key: "project_id", Value: 1}, {Key: "cached_at", Value: -1}},
+		Options: options.Index().SetName("prerender_data_project_time"),
+	})
+	create("prerender_data", mongo.IndexModel{
+		Keys:    bson.D{{Key: "cached_at", Value: 1}},
+		Options: options.Index().SetExpireAfterSeconds(90 * 24 * 3600).SetName("prerender_data_ttl"),
+	})
+
+	// crawl_queue: a project's renders, kept 30 days
+	create("crawl_queue", mongo.IndexModel{
+		Keys:    bson.D{{Key: "project_id", Value: 1}, {Key: "enqueued_at", Value: -1}},
+		Options: options.Index().SetName("crawl_queue_project_time"),
+	})
+	create("crawl_queue", mongo.IndexModel{
+		Keys:    bson.D{{Key: "enqueued_at", Value: 1}},
+		Options: options.Index().SetExpireAfterSeconds(30 * 24 * 3600).SetName("crawl_queue_ttl"),
+	})
+
 	// opportunities: one row per finding, kept across recomputations
 	create("opportunities", mongo.IndexModel{
 		Keys: bson.D{

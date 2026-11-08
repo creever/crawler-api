@@ -11,6 +11,7 @@ import (
 	"github.com/creever/crawler-api/config"
 	"github.com/creever/crawler-api/handlers"
 	"github.com/creever/crawler-api/middleware"
+	"github.com/creever/crawler-api/worker"
 )
 
 // Setup registers all routes on the given router
@@ -26,7 +27,7 @@ func Setup(router *gin.Engine, db *mongo.Database, logger *zap.Logger, corsOrigi
 	})
 
 	// Public: nginx prerender proxy (must stay unauthenticated)
-	serveH := handlers.NewServeHandler(db, asynqClient)
+	serveH := handlers.NewServeHandler(db, asynqClient, worker.NewProcessor(db, logger, cfg.CrawlerAddr, asynqClient))
 	router.GET("/prerender", serveH.Serve)
 
 	// Public: MCP endpoint (custom connector for claude.ai), bearer-token auth
@@ -36,12 +37,8 @@ func Setup(router *gin.Engine, db *mongo.Database, logger *zap.Logger, corsOrigi
 	// Instantiate handlers
 	dashboardH := handlers.NewDashboardHandler(db)
 	projectH := handlers.NewProjectHandler(db)
-	seoH := handlers.NewSEOHandler(db)
-	prerenderH := handlers.NewPrerenderHandler(db)
+	prerenderH := handlers.NewPrerenderHandler(db, asynqClient)
 	settingsH := handlers.NewSettingsHandler(db)
-	cacheH := handlers.NewCacheHandler(db)
-	queueH := handlers.NewQueueHandler(db, asynqClient)
-	discoveryH := handlers.NewDiscoveryHandler(db, asynqClient)
 	blogConfigH := handlers.NewBlogConfigHandler(db)
 	blogPostH := handlers.NewBlogPostHandler(db, asynqClient)
 	gscH := handlers.NewGSCHandler(db, asynqClient)
@@ -72,7 +69,6 @@ func Setup(router *gin.Engine, db *mongo.Database, logger *zap.Logger, corsOrigi
 		protected := api.Group("", middleware.RequireAuth(jwtSecret))
 		{
 			// Dashboard
-			protected.GET("/dashboard", dashboardH.Get)
 
 			// AI providers / models
 			aiH := handlers.NewAIHandler()
@@ -106,28 +102,17 @@ func Setup(router *gin.Engine, db *mongo.Database, logger *zap.Logger, corsOrigi
 				projects.GET("/:id/analyses", analysisH.List)
 				projects.GET("/:id/analyses/:aid", analysisH.Get)
 				projects.GET("/:id/impact", taskH.Impact)
+				projects.GET("/:id/dashboard", dashboardH.Get)
+				projects.GET("/:id/prerender/stats", prerenderH.Stats)
+				projects.GET("/:id/prerender/requests", prerenderH.Requests)
+				projects.GET("/:id/cache", prerenderH.CacheList)
+				projects.POST("/:id/cache/refresh", prerenderH.CacheRefresh)
+				projects.GET("/:id/cache/:cid", prerenderH.CacheGet)
+				projects.DELETE("/:id/cache/:cid", prerenderH.CacheDelete)
+				projects.GET("/:id/render-queue", prerenderH.RenderQueue)
 				projects.POST("/:id/ga4/sync", ga4H.TriggerSync)
 				projects.GET("/:id/ga4/status", ga4H.Status)
 				projects.GET("/:id/ga4/report", ga4H.Report)
-			}
-
-			// SEO Analytics
-			seo := protected.Group("/seo")
-			{
-				seo.GET("", seoH.List)
-				seo.POST("", seoH.Create)
-				seo.GET("/:id", seoH.Get)
-				seo.DELETE("/:id", seoH.Delete)
-			}
-
-			// Prerender Analytics
-			prerender := protected.Group("/prerender")
-			{
-				prerender.GET("", prerenderH.List)
-				prerender.POST("", prerenderH.Create)
-				prerender.GET("/stats", prerenderH.Stats)
-				prerender.GET("/:id", prerenderH.Get)
-				prerender.DELETE("/:id", prerenderH.Delete)
 			}
 
 			// Settings (write operations admin-only)
@@ -136,35 +121,6 @@ func Setup(router *gin.Engine, db *mongo.Database, logger *zap.Logger, corsOrigi
 				settings.GET("", settingsH.List)
 				settings.PUT("", middleware.RequireAdmin(), settingsH.Upsert)
 				settings.DELETE("/:key", middleware.RequireAdmin(), settingsH.Delete)
-			}
-
-			// Cache Manager
-			cache := protected.Group("/cache")
-			{
-				cache.GET("", cacheH.List)
-				cache.POST("", cacheH.Create)
-				cache.GET("/:id", cacheH.Get)
-				cache.PUT("/:id", cacheH.Update)
-				cache.DELETE("/:id", cacheH.Delete)
-			}
-
-			// Crawl Queue
-			queue := protected.Group("/queue")
-			{
-				queue.GET("", queueH.List)
-				queue.POST("", queueH.Enqueue)
-				queue.GET("/:id", queueH.Get)
-				queue.PATCH("/:id", queueH.UpdateStatus)
-				queue.DELETE("/:id", queueH.Delete)
-			}
-
-			// Discovery
-			discover := protected.Group("/discover")
-			{
-				discover.GET("", discoveryH.List)
-				discover.POST("", discoveryH.Start)
-				discover.GET("/:id", discoveryH.Get)
-				discover.DELETE("/:id", discoveryH.Delete)
 			}
 
 			// Blog generation

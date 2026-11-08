@@ -419,9 +419,11 @@ func (p *Processor) HandleSiteCrawl(ctx context.Context, t *asynq.Task) error {
 	if _, err = p.db.Collection("site_audits").InsertOne(ctx, audit); err != nil {
 		return err
 	}
-	read, probe, crawlErr := p.crawlSite(ctx, &project, audit.StartedAt)
-	audit.PagesReadNow = read
-	audit.NotFound = probe
+	run, crawlErr := p.crawlSite(ctx, &project, audit.StartedAt)
+	audit.PagesReadNow = run.Read
+	audit.NotFound = run.NotFound
+	audit.Rendering = run.Rendering
+	probe := run.NotFound
 	if crawlErr == nil {
 		crawlErr = p.auditSite(ctx, &project, &audit)
 	}
@@ -443,7 +445,7 @@ func (p *Processor) HandleSiteCrawl(ctx context.Context, t *asynq.Task) error {
 	if err = p.recordNotFoundProbe(ctx, &project, probe, finished); err != nil {
 		p.logger.Warn("soft 404 task not updated", zap.String("project_id", payload.ProjectID), zap.Error(err))
 	}
-	p.logger.Info("site crawl completed", zap.String("project_id", payload.ProjectID), zap.Int("pages_read", read),
+	p.logger.Info("site crawl completed", zap.String("project_id", payload.ProjectID), zap.Int("pages_read", run.Read),
 		zap.Float64("score", audit.Score), zap.Int("pages", audit.PagesFetched))
 	return nil
 }
@@ -467,40 +469,55 @@ func (p *Processor) recordNotFoundProbe(ctx context.Context, project *models.Pro
 	return err
 }
 
+// siteCrawlRun is what a crawl did besides storing the pages it read.
+type siteCrawlRun struct {
+	Read      int
+	NotFound  *models.NotFoundProbe
+	Rendering *models.RenderingProbe
+}
+
 // crawlSite gathers the site's URLs and reads up to the budget. Links found on
 // the pages read join the queue, so a site without a sitemap is still walked.
-func (p *Processor) crawlSite(ctx context.Context, project *models.Project, now time.Time) (int, *models.NotFoundProbe, error) {
+func (p *Processor) crawlSite(ctx context.Context, project *models.Project, now time.Time) (siteCrawlRun, error) {
+	var run siteCrawlRun
 	rules := p.siteRobots(ctx, project.URL)
 	sitemapPages, sitemapOK := p.loadSitemaps(ctx, project.URL, rules.Sitemaps)
 	if err := p.recordURLs(ctx, project.ID, sitemapPages, models.URLSourceSitemap, now); err != nil {
-		return 0, nil, fmt.Errorf("record sitemap URLs: %w", err)
+		return run, fmt.Errorf("record sitemap URLs: %w", err)
 	}
 	if sitemapOK {
 		if _, err := p.db.Collection("site_urls").UpdateMany(ctx,
 			bson.M{"project_id": project.ID, "in_sitemap": true, "sitemap_seen_at": bson.M{"$lt": now}},
 			bson.M{"$set": bson.M{"in_sitemap": false}}); err != nil {
-			return 0, nil, err
+			return run, err
 		}
 	}
 	if err := p.recordURLs(ctx, project.ID, []string{project.URL}, models.URLSourceSeed, now); err != nil {
-		return 0, nil, err
+		return run, err
 	}
 	known, err := p.siteCandidates(ctx, project)
 	if err != nil {
-		return 0, nil, err
+		return run, err
 	}
 	if err = p.recordURLs(ctx, project.ID, known, models.URLSourceGSC, now); err != nil {
-		return 0, nil, err
+		return run, err
+	}
+	botPages, err := p.botRequestedURLs(ctx, project, now)
+	if err != nil {
+		return run, err
+	}
+	if err = p.recordURLs(ctx, project.ID, botPages, models.URLSourceBot, now); err != nil {
+		return run, err
 	}
 
 	urls, err := p.loadSiteURLs(ctx, project.ID)
 	if err != nil {
-		return 0, nil, err
+		return run, err
 	}
 	curStart, end, _, _ := analysisWindows()
 	totals, err := p.gscPageTotals(ctx, project.ID, curStart, end, 0)
 	if err != nil {
-		return 0, nil, err
+		return run, err
 	}
 	impressions := make(map[string]float64, len(totals))
 	for _, r := range totals {
@@ -527,7 +544,7 @@ func (p *Processor) crawlSite(ctx context.Context, project *models.Project, now 
 	if len(blocked) > 0 {
 		if _, err = p.db.Collection("site_urls").UpdateMany(ctx, bson.M{"project_id": project.ID, "url": bson.M{"$in": blocked}},
 			bson.M{"$set": bson.M{"disallowed": true}}); err != nil {
-			return 0, nil, err
+			return run, err
 		}
 	}
 
@@ -536,16 +553,20 @@ func (p *Processor) crawlSite(ctx context.Context, project *models.Project, now 
 	for _, q := range queue {
 		queued[normalizePageURL(q)] = true
 	}
-	pacer := &renderPacer{delay: rules.Delay, remaining: siteCrawlBudget + 1}
-	probe, err := p.notFoundProbe(ctx, project, pacer)
+	pacer := &renderPacer{delay: rules.Delay, remaining: siteCrawlBudget + 1 + 2*renderingProbePages}
+	run.NotFound, err = p.notFoundProbe(ctx, project, pacer)
 	if err != nil {
 		p.logger.Info("site crawl: 404 probe failed", zap.String("project_id", project.ID.Hex()), zap.Error(err))
 	}
-	read := 0
+	run.Rendering = p.renderingProbe(ctx, project, queue, pacer)
+	useJS := project.UseJS
+	if run.Rendering != nil {
+		useJS = run.Rendering.Mode == renderModeJS
+	}
 	for len(queue) > 0 {
 		page := queue[0]
 		queue = queue[1:]
-		snap, readErr := p.readPage(ctx, project.ID, page, project.UseJS, pacer)
+		snap, readErr := p.readPage(ctx, project.ID, page, useJS, pacer)
 		if errors.Is(readErr, errRenderBudget) || ctx.Err() != nil {
 			break
 		}
@@ -557,12 +578,12 @@ func (p *Processor) crawlSite(ctx context.Context, project *models.Project, now 
 		}
 		if _, err = p.db.Collection("site_urls").UpdateOne(ctx, bson.M{"project_id": project.ID, "url": normalizePageURL(page)},
 			bson.M{"$set": set}); err != nil {
-			return read, nil, err
+			return run, err
 		}
 		if readErr != nil {
 			continue
 		}
-		read++
+		run.Read++
 		var found []string
 		for _, link := range snap.Links {
 			if !sampleableURL(link, project.URL) || !rules.allowed(link) {
@@ -577,10 +598,98 @@ func (p *Processor) crawlSite(ctx context.Context, project *models.Project, now 
 			knownURL[key] = true
 		}
 		if err = p.recordURLs(ctx, project.ID, found, models.URLSourceLink, at); err != nil {
-			return read, nil, err
+			return run, err
 		}
 	}
-	return read, probe, ctx.Err()
+	return run, ctx.Err()
+}
+
+const (
+	// renderingProbePages is how many pages are read both with and without
+	// JavaScript to tell whether the site needs it.
+	renderingProbePages = 3
+	// renderingWordsShare: plain HTML with less than this share of the
+	// rendered words needs JavaScript.
+	renderingWordsShare = 0.7
+	// renderingLinksShare is lower: a menu built by a script adds many links
+	// to a page whose content is all in the HTML, and that should not send a
+	// whole crawl through Chrome.
+	renderingLinksShare = 0.5
+	renderModeJS          = "js"
+	renderModeHTML        = "html"
+)
+
+// renderingProbe reads the home page and the first pages of the queue with
+// and without JavaScript. A site whose plain HTML carries the content is
+// crawled without Chrome, which is several times cheaper; a site that needs
+// JavaScript is crawled with it whatever the project says. Nil when the probe
+// could not read a page both ways.
+func (p *Processor) renderingProbe(ctx context.Context, project *models.Project, queue []string, pacer *renderPacer) *models.RenderingProbe {
+	pages := []string{project.URL}
+	for _, q := range queue {
+		if len(pages) >= renderingProbePages {
+			break
+		}
+		if normalizePageURL(q) != normalizePageURL(project.URL) {
+			pages = append(pages, q)
+		}
+	}
+	probe := &models.RenderingProbe{}
+	for _, page := range pages {
+		plain, rendered, err := p.readBothWays(ctx, page, pacer)
+		if err != nil {
+			p.logger.Info("site crawl: rendering probe skipped a page", zap.String("page", page), zap.Error(err))
+			continue
+		}
+		probe.Pages = append(probe.Pages, page)
+		probe.HTMLWords += plain.TotalWordCount
+		probe.JSWords += rendered.TotalWordCount
+		probe.HTMLLinks += len(plain.Links)
+		probe.JSLinks += len(rendered.Links)
+	}
+	if len(probe.Pages) == 0 {
+		return nil
+	}
+	probe.NeedsJS = needsJS(probe)
+	probe.Mode = renderModeHTML
+	if probe.NeedsJS {
+		probe.Mode = renderModeJS
+	}
+	return probe
+}
+
+// needsJS reports whether the plain HTML clearly lacks the rendered content.
+func needsJS(r *models.RenderingProbe) bool {
+	short := func(plain, rendered int, share float64) bool {
+		return rendered > 0 && float64(plain) < share*float64(rendered)
+	}
+	return short(r.HTMLWords, r.JSWords, renderingWordsShare) || short(r.HTMLLinks, r.JSLinks, renderingLinksShare)
+}
+
+// readBothWays fetches a page without and with JavaScript, without storing.
+func (p *Processor) readBothWays(ctx context.Context, page string, pacer *renderPacer) (plain, rendered *models.PageSnapshot, err error) {
+	for _, js := range []bool{false, true} {
+		if err = pacer.wait(ctx); err != nil {
+			return nil, nil, err
+		}
+		got, fetchErr := p.fetchPage(ctx, page, js)
+		if fetchErr != nil {
+			return nil, nil, fetchErr
+		}
+		if got.Status >= 400 {
+			return nil, nil, fmt.Errorf("HTTP %d", got.Status)
+		}
+		snap, extractErr := extractSnapshot(page, got.Status, got.HTML)
+		if extractErr != nil {
+			return nil, nil, extractErr
+		}
+		if js {
+			rendered = snap
+		} else {
+			plain = snap
+		}
+	}
+	return plain, rendered, nil
 }
 
 // StartSiteCrawlScheduler starts the daily site crawl of active projects.

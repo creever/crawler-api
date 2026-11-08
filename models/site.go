@@ -25,6 +25,7 @@ const (
 	URLSourceSitemap = "sitemap"
 	URLSourceGSC     = "gsc"
 	URLSourceLink    = "link"
+	URLSourceBot     = "bot" // a bot asked /prerender for it
 )
 
 // SiteURL is one URL a project's site is known to have, read or not. It is the
@@ -85,9 +86,26 @@ type SiteAudit struct {
 	// NotFound is how the site answered a URL that cannot exist. A site should
 	// say 404 or 410; a 200, or a redirect to another page, is a soft 404.
 	NotFound         *NotFoundProbe   `bson:"not_found,omitempty" json:"not_found,omitempty"`
+	// Rendering compares a few pages read with and without JavaScript.
+	Rendering        *RenderingProbe  `bson:"rendering,omitempty" json:"rendering,omitempty"`
 	IssuesBySeverity map[string]int   `bson:"issues_by_severity" json:"issues_by_severity"` // pages per severity
 	IssuesByCode     map[string]int   `bson:"issues_by_code"     json:"issues_by_code"`     // pages per issue
 	Groups           []SiteAuditGroup `bson:"groups"             json:"groups"`
+}
+
+// RenderingProbe compares what a client without JavaScript gets with the
+// rendered page. Crawlers of AI assistants and many other bots run no
+// JavaScript: content that needs it reaches them only through prerendering.
+type RenderingProbe struct {
+	Pages     []string `bson:"pages"      json:"pages"`
+	HTMLWords int      `bson:"html_words" json:"html_words"`
+	JSWords   int      `bson:"js_words"   json:"js_words"`
+	HTMLLinks int      `bson:"html_links" json:"html_links"`
+	JSLinks   int      `bson:"js_links"   json:"js_links"`
+	// NeedsJS is set when the plain HTML carries clearly less text or links.
+	NeedsJS bool `bson:"needs_js" json:"needs_js"`
+	// Mode is how this crawl read the site: "js" or "html".
+	Mode string `bson:"mode" json:"mode"`
 }
 
 // NotFoundProbe is the answer to a URL that cannot exist on the site.

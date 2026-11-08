@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/creever/crawler-api/models"
@@ -249,8 +250,8 @@ func sampleableURL(raw, siteURL string) bool {
 	return sameSite(u.Host, hostOf(siteURL))
 }
 
-// siteCandidates lists a project's known URLs besides its sitemap, strongest
-// first: its search pages, then whatever earlier crawls saw.
+// siteCandidates lists a project's search pages besides its sitemap,
+// strongest first.
 func (p *Processor) siteCandidates(ctx context.Context, project *models.Project) ([]string, error) {
 	curStart, end, _, _ := analysisWindows()
 	rows, err := p.gscPageTotals(ctx, project.ID, curStart, end, sampleCandidates)
@@ -260,21 +261,6 @@ func (p *Processor) siteCandidates(ctx context.Context, project *models.Project)
 	candidates := []string{project.URL}
 	for _, r := range rows {
 		candidates = append(candidates, r.Page)
-	}
-	cursor, err := p.db.Collection("seo_data").Find(ctx, bson.M{"project_id": project.ID},
-		options.Find().SetProjection(bson.M{"url": 1}).SetLimit(sampleCandidates))
-	if err != nil {
-		return nil, fmt.Errorf("crawled pages: %w", err)
-	}
-	defer cursor.Close(ctx) //nolint:errcheck
-	var crawled []struct {
-		URL string `bson:"url"`
-	}
-	if err = cursor.All(ctx, &crawled); err != nil {
-		return nil, fmt.Errorf("crawled pages: %w", err)
-	}
-	for _, c := range crawled {
-		candidates = append(candidates, c.URL)
 	}
 	out := candidates[:0]
 	for _, c := range candidates {
@@ -383,4 +369,37 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// botRequestWindow is how far back the pages bots asked for count as known.
+const botRequestWindow = 30 * 24 * time.Hour
+
+// botRequestedURLs lists the pages bots asked /prerender for lately, most
+// asked first. They are pages of the site the crawl should know.
+func (p *Processor) botRequestedURLs(ctx context.Context, project *models.Project, now time.Time) ([]string, error) {
+	cursor, err := p.db.Collection("prerender_data").Aggregate(ctx, mongo.Pipeline{
+		{{Key: "$match", Value: bson.M{
+			"project_id": project.ID, "cached_at": bson.M{"$gte": now.Add(-botRequestWindow)},
+			"requester_type": bson.M{"$ne": models.RequesterTypeHuman}, "status_code": bson.M{"$lt": 400},
+		}}},
+		{{Key: "$group", Value: bson.M{"_id": "$url", "n": bson.M{"$sum": 1}}}},
+		{{Key: "$sort", Value: bson.D{{Key: "n", Value: -1}, {Key: "_id", Value: 1}}}},
+		{{Key: "$limit", Value: sampleCandidates}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("bot requests: %w", err)
+	}
+	var rows []struct {
+		URL string `bson:"_id"`
+	}
+	if err = cursor.All(ctx, &rows); err != nil {
+		return nil, fmt.Errorf("bot requests: %w", err)
+	}
+	urls := make([]string, 0, len(rows))
+	for _, r := range rows {
+		if sampleableURL(r.URL, project.URL) {
+			urls = append(urls, r.URL)
+		}
+	}
+	return urls, nil
 }

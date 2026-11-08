@@ -32,6 +32,21 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		// The site crawl replaced Discovery and the crawl:seo pipeline. Their
+		// collections go, and the prerender cache starts over keyed by page:
+		// the old one held duplicates and SEO-only entries without HTML that
+		// /prerender served to bots as empty pages.
+		name: "2026-11-08-prerender-on-the-site-crawl",
+		run: func(ctx context.Context, database *mongo.Database) error {
+			for _, name := range []string{"seo_data", "discoveries", "cache_entries", "crawl_queue"} {
+				if err := database.Collection(name).Drop(ctx); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	},
 }
 
 // RunMigrations applies the migrations not yet recorded. A failed one is

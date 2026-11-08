@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -83,12 +84,11 @@ var mcpTools = []mcpTool{
 	},
 	{
 		Name:        "start_crawl",
-		Description: "Enqueue an SEO crawl task for a project URL (rate-limited: one crawl per project per 10 minutes).",
+		Description: "Start a site crawl of a project now: the sitemap, Search Console and linked pages are read, up to the run's budget, and Site Health, its audit and the structural tasks are refreshed. One crawl per project runs at a time.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"project_id": map[string]interface{}{"type": "string"},
-				"url":        map[string]interface{}{"type": "string", "description": "Defaults to the project URL"},
 			},
 			"required": []string{"project_id"},
 		},
@@ -413,52 +413,20 @@ func (h *MCPHandler) toolStartCrawl(ctx context.Context, args map[string]interfa
 	if errMsg != "" {
 		return nil, errMsg
 	}
-	var project models.Project
-	if err := h.db.Collection("projects").FindOne(ctx, bson.M{"_id": oid}).Decode(&project); err != nil {
+	if n, err := h.db.Collection("projects").CountDocuments(ctx, bson.M{"_id": oid}); err != nil || n == 0 {
 		return nil, "project not found"
 	}
-
-	// Rate-limit: one crawl per project per 10 minutes.
-	recent, err := h.db.Collection("crawl_queue").CountDocuments(ctx, bson.M{
-		"project_id":  oid,
-		"enqueued_at": bson.M{"$gte": time.Now().UTC().Add(-10 * time.Minute)},
-	})
-	if err == nil && recent > 0 {
-		return nil, "rate limited: a crawl for this project was enqueued in the last 10 minutes"
-	}
-
-	url, _ := args["url"].(string)
-	if url == "" {
-		url = project.URL
-	}
-
-	entryID := bson.NewObjectID()
-	entry := models.QueueEntry{
-		ID:         entryID,
-		ProjectID:  oid,
-		URL:        url,
-		TaskType:   models.QueueTaskTypeSEO,
-		Status:     models.QueueStatusPending,
-		EnqueuedAt: time.Now().UTC(),
-	}
-	task, err := worker.NewCrawlSEOTask(entryID.Hex(), models.ProjectConfig{
-		ProjectID: oid.Hex(),
-		SeedURLs:  []string{url},
-		UseJS:     project.UseJS,
-		MaxPages:  1,
-	})
+	task, err := worker.NewSiteCrawlTask(oid.Hex())
 	if err != nil {
 		return nil, err.Error()
 	}
-	info, err := h.asynqClient.EnqueueContext(ctx, task)
-	if err != nil {
+	if _, err = h.asynqClient.EnqueueContext(ctx, task); err != nil {
+		if errors.Is(err, asynq.ErrDuplicateTask) {
+			return nil, "a site crawl of this project is already queued or running"
+		}
 		return nil, err.Error()
 	}
-	entry.AsynqTaskID = info.ID
-	if _, err = h.db.Collection("crawl_queue").InsertOne(ctx, entry); err != nil {
-		return nil, err.Error()
-	}
-	return gin.H{"enqueued": true, "queue_entry_id": entryID.Hex(), "url": url}, ""
+	return gin.H{"enqueued": true, "project_id": oid.Hex()}, ""
 }
 
 func argTaskFilter(args map[string]interface{}) (bson.M, string) {

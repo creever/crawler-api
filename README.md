@@ -43,20 +43,21 @@ All endpoints are prefixed with `/api/v1`.
 | Method   | Path                    | Description                             |
 |----------|-------------------------|-----------------------------------------|
 | `GET`    | `/health`               | Health check                            |
-| `GET`    | `/api/v1/dashboard`     | Aggregated dashboard statistics         |
+| `GET`    | `/prerender?url=`       | Public: rendered HTML of a page for a bot; `X-Prerender-Status` and `X-Prerender-Cache` headers |
+| `GET`    | `/api/v1/projects/:id/dashboard` | Site health, search, work list and prerender in one call |
+| `GET`    | `/api/v1/projects/:id/prerender/stats` | Prerender analytics (`days`) |
+| `GET`    | `/api/v1/projects/:id/prerender/requests` | Request log |
+| `GET`    | `/api/v1/projects/:id/cache` | Cached renders (`q`, `state`, `sort`, `page`, `size`) |
+| `GET`    | `/api/v1/projects/:id/cache/:cid` | One cached render with its site-crawl profile |
+| `DELETE` | `/api/v1/projects/:id/cache/:cid` | Remove a cached render |
+| `POST`   | `/api/v1/projects/:id/cache/refresh` | Queue fresh renders of up to 50 URLs |
+| `GET`    | `/api/v1/projects/:id/render-queue` | Recent renders (`status`) |
+| `POST`   | `/api/v1/projects/:id/site/crawl` | Start a site crawl |
 | `GET`    | `/api/v1/projects`      | List all projects                       |
 | `POST`   | `/api/v1/projects`      | Create a project                        |
 | `GET`    | `/api/v1/projects/:id`  | Get a project                           |
 | `PUT`    | `/api/v1/projects/:id`  | Update a project                        |
 | `DELETE` | `/api/v1/projects/:id`  | Delete a project                        |
-| `GET`    | `/api/v1/seo`           | List SEO records (filter: `project_id`) |
-| `POST`   | `/api/v1/seo`           | Ingest SEO data from the bot            |
-| `GET`    | `/api/v1/seo/:id`       | Get a SEO record                        |
-| `DELETE` | `/api/v1/seo/:id`       | Delete a SEO record                     |
-| `GET`    | `/api/v1/prerender`     | List prerender records (filter: `project_id`) |
-| `POST`   | `/api/v1/prerender`     | Ingest prerender data from the bot      |
-| `GET`    | `/api/v1/prerender/:id` | Get a prerender record                  |
-| `DELETE` | `/api/v1/prerender/:id` | Delete a prerender record               |
 | `GET`    | `/api/v1/settings`      | List all settings                       |
 | `PUT`    | `/api/v1/settings`      | Create or update a setting (upsert)     |
 | `DELETE` | `/api/v1/settings/:key` | Delete a setting                        |
