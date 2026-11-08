@@ -385,3 +385,45 @@ func TestSoftNotFoundTask(t *testing.T) {
 		}
 	}
 }
+
+func TestPlanCrawlPutsTrafficFirst(t *testing.T) {
+	var urls []models.SiteURL
+	impressions := map[string]float64{}
+	// Many sections without traffic, and a few pages with it in one section.
+	for i := 0; i < 50; i++ {
+		u := fmt.Sprintf("https://x.example/s%d/a/b/c%d", i, i)
+		urls = append(urls, models.SiteURL{URL: u, SourceURL: u})
+	}
+	for i := 0; i < 6; i++ {
+		u := fmt.Sprintf("https://x.example/p-%d000", i)
+		urls = append(urls, models.SiteURL{URL: u, SourceURL: u})
+		impressions[u] = float64(100 - i)
+	}
+	fresh := map[string]bool{"https://x.example/p-0000": true}
+	plan := planCrawl(urls, impressions, fresh, 10)
+	if len(plan) != 10 || plan[0] != "https://x.example/p-1000" || plan[4] != "https://x.example/p-5000" {
+		t.Fatalf("traffic pages first, by impressions, fresh ones skipped: %v", plan)
+	}
+	seen := map[string]bool{}
+	for _, u := range plan {
+		if seen[u] {
+			t.Fatalf("planned twice: %s", u)
+		}
+		seen[u] = true
+	}
+}
+
+func TestBaseHrefResolvesLinks(t *testing.T) {
+	page := `<html><head><base href="https://x.example/shop/"></head><body><h1>T</h1><a href="noi/csizma">rel</a></body></html>`
+	snap, err := extractSnapshot("https://x.example/a/b/c", 200, page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Links) != 1 || snap.Links[0] != "https://x.example/shop/noi/csizma" {
+		t.Fatalf("links: %v", snap.Links)
+	}
+	snap, _ = extractSnapshot("https://x.example/a/b/c", 200, `<html><body><a href="noi/csizma">rel</a></body></html>`)
+	if len(snap.Links) != 1 || snap.Links[0] != "https://x.example/a/b/noi/csizma" {
+		t.Fatalf("without base: %v", snap.Links)
+	}
+}

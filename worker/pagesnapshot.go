@@ -890,7 +890,7 @@ func extractHeadings(body *html.Node, seg *segmenter, snap *models.PageSnapshot)
 // extractLinksAndImages records same-site links found outside site chrome and
 // listing cards, plus image alt coverage for the whole page.
 func extractLinksAndImages(body *html.Node, seg *segmenter, pageURL string, snap *models.PageSnapshot) {
-	base, _ := url.Parse(pageURL)
+	base := documentBase(body, pageURL)
 	cards := listingNodes(seg)
 	seen := make(map[string]bool)
 	graph := make(map[string]bool)
@@ -930,6 +930,27 @@ func extractLinksAndImages(body *html.Node, seg *segmenter, pageURL string, snap
 		}
 	}
 	walk(body)
+}
+
+// documentBase is what relative links resolve against: the page URL, or the
+// <base href> of its head, as a browser reads it.
+func documentBase(body *html.Node, pageURL string) *url.URL {
+	page, err := url.Parse(pageURL)
+	if err != nil {
+		return nil
+	}
+	root := body
+	for root.Parent != nil {
+		root = root.Parent
+	}
+	if b := findFirst(root, func(n *html.Node) bool { return n.DataAtom == atom.Base }); b != nil {
+		if href, ok := attr(b, "href"); ok {
+			if ref, refErr := url.Parse(strings.TrimSpace(href)); refErr == nil {
+				return page.ResolveReference(ref)
+			}
+		}
+	}
+	return page
 }
 
 // isContentAnchor rejects anchors that say nothing, like pagination numbers.

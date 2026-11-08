@@ -298,6 +298,39 @@ func orderFrontier(urls []models.SiteURL, impressions map[string]float64) []stri
 	return out
 }
 
+// trafficShare is the part of the budget kept for pages with search traffic.
+// They carry the score; spreading the whole budget over the site's sections
+// would leave them unread on a site with thousands of URLs.
+const trafficShare = 0.8
+
+// planCrawl picks the pages of one run: those with search traffic first, by
+// impressions, then the rest spread over the site's sections.
+func planCrawl(urls []models.SiteURL, impressions map[string]float64, fresh map[string]bool, budget int) []string {
+	ordered := orderFrontier(urls, impressions)
+	var plan []string
+	taken := make(map[string]bool)
+	byTraffic := append([]models.SiteURL(nil), urls...)
+	sort.SliceStable(byTraffic, func(i, j int) bool { return impressions[byTraffic[i].URL] > impressions[byTraffic[j].URL] })
+	limit := int(trafficShare * float64(budget))
+	for _, u := range byTraffic {
+		if len(plan) >= limit || impressions[u.URL] <= 0 {
+			break
+		}
+		if !fresh[u.URL] {
+			plan = append(plan, u.SourceURL)
+			taken[u.URL] = true
+		}
+	}
+	skip := make(map[string]bool, len(fresh)+len(taken))
+	for k := range fresh {
+		skip[k] = true
+	}
+	for k := range taken {
+		skip[k] = true
+	}
+	return append(plan, pickSample(ordered, skip, budget-len(plan))...)
+}
+
 func (p *Processor) loadSiteURLs(ctx context.Context, projectOID bson.ObjectID) ([]models.SiteURL, error) {
 	cursor, err := p.db.Collection("site_urls").Find(ctx, bson.M{"project_id": projectOID})
 	if err != nil {
@@ -498,7 +531,7 @@ func (p *Processor) crawlSite(ctx context.Context, project *models.Project, now 
 		}
 	}
 
-	queue := pickSample(orderFrontier(eligible, impressions), fresh, siteCrawlBudget)
+	queue := planCrawl(eligible, impressions, fresh, siteCrawlBudget)
 	queued := make(map[string]bool, len(queue))
 	for _, q := range queue {
 		queued[normalizePageURL(q)] = true
