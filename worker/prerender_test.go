@@ -298,3 +298,20 @@ func TestIntegrationWarmCacheOnlyForUsedPrerender(t *testing.T) {
 		t.Fatal("an error page is not warmed")
 	}
 }
+
+func TestCrawlMode(t *testing.T) {
+	cases := []struct {
+		projectUsesJS, needsJS bool
+		want                   string
+	}{
+		{false, false, renderModeHTML},
+		{false, true, renderModeJS},
+		{true, false, renderModeJS}, // the project's choice stands
+		{true, true, renderModeJS},
+	}
+	for _, c := range cases {
+		if got := crawlMode(c.projectUsesJS, c.needsJS); got != c.want {
+			t.Errorf("crawlMode(%v, %v) = %q, want %q", c.projectUsesJS, c.needsJS, got, c.want)
+		}
+	}
+}

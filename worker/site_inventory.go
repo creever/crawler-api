@@ -702,10 +702,11 @@ const (
 )
 
 // renderingProbe reads the home page and the first pages of the queue with
-// and without JavaScript. A site whose plain HTML carries the content is
-// crawled without Chrome, which is several times cheaper; a site that needs
-// JavaScript is crawled with it whatever the project says. Nil when the probe
-// could not read a page both ways.
+// and without JavaScript. A site that needs JavaScript is crawled with it
+// whatever the project says. Otherwise the plain HTML carries the content and
+// the site is crawled without Chrome, which is several times cheaper, unless
+// the project asks for JavaScript. Nil when the probe could not read a page
+// both ways.
 func (p *Processor) renderingProbe(ctx context.Context, project *models.Project, queue []string, pacer *renderPacer) *models.RenderingProbe {
 	pages := []string{project.URL}
 	for _, q := range queue {
@@ -738,11 +739,17 @@ func (p *Processor) renderingProbe(ctx context.Context, project *models.Project,
 		return nil
 	}
 	probe.NeedsJS = needsJS(probe)
-	probe.Mode = renderModeHTML
-	if probe.NeedsJS {
-		probe.Mode = renderModeJS
-	}
+	probe.Mode = crawlMode(project.UseJS, probe.NeedsJS)
 	return probe
+}
+
+// crawlMode is how a site is crawled: the probe can only add JavaScript to a
+// project that does not ask for it, never take it away.
+func crawlMode(projectUsesJS, needsJS bool) string {
+	if projectUsesJS || needsJS {
+		return renderModeJS
+	}
+	return renderModeHTML
 }
 
 // needsJS reports whether the plain HTML clearly lacks the rendered content.
