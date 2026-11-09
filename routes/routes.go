@@ -100,6 +100,7 @@ func Setup(router *gin.Engine, db *mongo.Database, logger *zap.Logger, corsOrigi
 				projects.GET("/:id/site/pages", siteH.Pages)
 				projects.GET("/:id/site/page", siteH.Page)
 				projects.POST("/:id/site/crawl", siteH.Crawl)
+				projects.POST("/:id/site/clear", siteH.ClearData)
 				projects.PATCH("/:id/tasks/:tid", taskH.Update)
 				projects.GET("/:id/analyses", analysisH.List)
 				projects.GET("/:id/analyses/:aid", analysisH.Get)

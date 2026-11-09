@@ -413,6 +413,34 @@ func (h *SiteHandler) Crawl(c *gin.Context) {
 	c.JSON(http.StatusAccepted, gin.H{"status": "enqueued"})
 }
 
+// ClearData godoc
+// @Summary      Clear a project's crawl results, tasks, suggestions and cached renders
+// @Description  The next site crawl reads every page again. Search and analytics data, the request log and settings are kept.
+// @Tags         projects
+// @Produce      json
+// @Param        id  path  string  true  "Project ID"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      409  {object}  map[string]string
+// @Router       /api/v1/projects/{id}/site/clear [post]
+func (h *SiteHandler) ClearData(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	id, ok := projectFromRequest(ctx, c, h.db)
+	if !ok {
+		return
+	}
+	if h.crawlRunning(ctx, id) {
+		c.JSON(http.StatusConflict, gin.H{"error": "a site crawl is running for this project; clear the data when it has finished"})
+		return
+	}
+	deleted, err := worker.ClearCrawlData(ctx, h.db, id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to clear the data; try again"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"deleted": deleted})
+}
+
 // Vitals godoc
 // @Summary      Core Web Vitals of the project's page types, latest run
 // @Tags         projects

@@ -53,6 +53,7 @@ All endpoints are prefixed with `/api/v1`.
 | `POST`   | `/api/v1/projects/:id/cache/refresh` | Queue fresh renders of up to 50 URLs |
 | `GET`    | `/api/v1/projects/:id/render-queue` | Recent renders (`status`) |
 | `POST`   | `/api/v1/projects/:id/site/crawl` | Start a site crawl |
+| `POST`   | `/api/v1/projects/:id/site/clear` | Delete crawl results, tasks, suggestions and cached renders; the next crawl reads every page |
 | `GET`    | `/api/v1/projects/:id/ai-visibility` | AI crawlers: robots.txt access, requests, content without JavaScript |
 | `GET`    | `/api/v1/projects/:id/site/vitals` | Core Web Vitals per page type, latest run (`POST` measures now) |
 | `GET`    | `/api/v1/projects/:id/cdn` | CDN connection and recent purges (`PUT` connects Bunny; the key is never returned) |
